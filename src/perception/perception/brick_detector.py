@@ -75,7 +75,6 @@ COLOR_RANGES = {
     'light_blue': [((91, 49, 132), (108, 142, 255))],
 }
 
-
 # ---------------------------------------------------------------------------
 # RViz marker colours (R, G, B, A) per colour name
 # ---------------------------------------------------------------------------
@@ -88,6 +87,9 @@ BRICK_COLORS_RGBA = {
     'mint':        (0.60, 1.00, 0.82, 1.0),
     'white':       (0.95, 0.95, 0.95, 1.0),
     'purple':      (0.60, 0.20, 0.85, 1.0),
+    'brown':       (0.55, 0.27, 0.07, 1.0),
+    'hot_pink':    (1.00, 0.08, 0.58, 1.0),
+    'light_blue':  (0.68, 0.85, 0.90, 1.0),
 }
 
 # ---------------------------------------------------------------------------
@@ -120,11 +122,10 @@ HEIGHT_THRESHOLDS = {
 }
 
 # ---------------------------------------------------------------------------
-# Stud detection
+# Blob size filter — contours smaller than this are ignored as noise.
+# Increase if spurious detections appear; decrease if small bricks are missed.
 # ---------------------------------------------------------------------------
-STUD_MIN_RADIUS_PX = 5
-STUD_MAX_RADIUS_PX = 20
-STUD_MIN_DIST_PX   = 15
+BLOB_MIN_AREA_PX = 150
 
 # ---------------------------------------------------------------------------
 # Point cloud / RANSAC parameters
@@ -232,12 +233,15 @@ class BrickDetectorNode(Node):
         debug = rgb.copy()
 
         # ── Ground plane via RANSAC on point cloud ──────────────────────────
-        # This replaces the fragile single-pixel baseplate depth reference.
-        # Runs every cycle so it stays current if the camera moves.
         if self.latest_xyz is not None:
             gp = self._fit_ground_plane(self.latest_xyz)
             if gp is not None:
                 self.ground_plane = gp
+
+        # ── Table / baseplate depth mask ─────────────────────────────────────
+        # Any pixel at (or below) the ground plane is table — not a brick.
+        # We erode the mask slightly to handle depth-sensor edge noise.
+        above_table_mask = self._make_above_table_mask(depth, rgb.shape)
 
         # ── Baseplate 2D detection (debug overlay + TF only) ────────────────
         bp = self.detect_baseplate(rgb, depth)
@@ -253,15 +257,18 @@ class BrickDetectorNode(Node):
 
         for color_name, ranges in COLOR_RANGES.items():
             mask   = self.color_segment(rgb, ranges)
+            # Remove pixels at table/baseplate depth — only keep elevated blobs
+            if above_table_mask is not None:
+                mask = cv2.bitwise_and(mask, above_table_mask)
             blocks = self.split_by_depth(mask, depth)
 
             for block_mask in blocks:
-                result = self.detect_studs(rgb, block_mask)
+                result = self.detect_brick(block_mask, depth, rgb.shape)
                 if result is None:
                     continue
-                stud_centers, brick_shape, angle_deg = result
+                centroid_px, brick_shape, angle_deg = result
 
-                pose_cam = self.compute_3d_pose(stud_centers, angle_deg, depth)
+                pose_cam = self.compute_3d_pose(centroid_px, angle_deg, depth)
                 if pose_cam is None:
                     continue
 
@@ -277,7 +284,7 @@ class BrickDetectorNode(Node):
                     'pose':        pose_cam,
                 })
 
-                self.draw_detection(debug, stud_centers, color_name,
+                self.draw_detection(debug, block_mask, color_name,
                                     brick_shape, height_type, height_m)
 
         bricks_base = self.publish_poses(all_bricks)
@@ -443,6 +450,54 @@ class BrickDetectorNode(Node):
                 return label
         return 'normal'
 
+    def _make_above_table_mask(self, depth: np.ndarray,
+                                rgb_shape: tuple) -> np.ndarray:
+        """
+        Build a uint8 mask (255 = above table, 0 = table/background) by
+        comparing each depth pixel to the fitted ground plane.
+
+        Any pixel whose 3D point is more than TABLE_MASK_MARGIN_M above the
+        ground plane is kept; everything at table level is zeroed out.
+
+        Returns None if the ground plane hasn't been fitted yet (first few
+        frames), in which case callers should skip masking rather than
+        discarding all detections.
+        """
+        TABLE_MASK_MARGIN_M = 0.008   # 8 mm — ignore anything ≤ this above table
+
+        if self.ground_plane is None or self.fx is None:
+            return None
+
+        normal, d = self.ground_plane
+        H, W      = depth.shape
+
+        # Back-project every depth pixel to 3D in camera frame
+        u = np.arange(W, dtype=np.float32)
+        v = np.arange(H, dtype=np.float32)
+        uu, vv = np.meshgrid(u, v)
+
+        Z = depth.astype(np.float32)
+        X = (uu - self.cx) * Z / self.fx
+        Y = (vv - self.cy) * Z / self.fy
+
+        # Height above plane: -(normal · [X,Y,Z] + d)
+        height_map = -(X * normal[0] + Y * normal[1] + Z * normal[2] + d)
+
+        # Pixels with invalid depth or at/below table surface → 0
+        above = ((height_map > TABLE_MASK_MARGIN_M) &
+                 (Z > 0) & np.isfinite(Z)).astype(np.uint8) * 255
+
+        # Erode slightly to trim noisy brick edges that straddle the table
+        k     = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        above = cv2.erode(above, k, iterations=1)
+
+        # Resize to RGB image dimensions if depth resolution differs
+        if (H, W) != rgb_shape[:2]:
+            above = cv2.resize(above, (rgb_shape[1], rgb_shape[0]),
+                               interpolation=cv2.INTER_NEAREST)
+
+        return above
+
     # -----------------------------------------------------------------------
     # Color / blob helpers
     # -----------------------------------------------------------------------
@@ -487,55 +542,137 @@ class BrickDetectorNode(Node):
         return blobs
 
     # -----------------------------------------------------------------------
-    # Stud detection
+    # Brick detection — footprint-based (replaces stud counting)
+    #
+    # Root cause of the 1×1 problem: HoughCircles needs every stud to be
+    # clearly visible and perfectly circular.  In practice, lighting, focus,
+    # and viewing angle cause it to miss most studs, collapsing every brick
+    # to a single detected circle → (1,1) shape.
+    #
+    # Fix: measure the *physical footprint* of the colour blob instead.
+    #   • Orientation — minAreaRect on the blob contour (robust, one-shot)
+    #   • Shape       — 3D cluster extent projected onto the ground plane
+    #                   (primary), or 2D blob size ÷ depth (fallback)
+    #   • Centroid    — centre of minAreaRect (one clean point → pose)
     # -----------------------------------------------------------------------
 
-    def detect_studs(self, rgb: np.ndarray, blob_mask: np.ndarray):
-        """Detect studs via HoughCircles. Returns (centers, shape, angle) or None."""
-        gray    = cv2.cvtColor(rgb, cv2.COLOR_BGR2GRAY)
-        masked  = cv2.bitwise_and(gray, gray, mask=blob_mask)
-        blurred = cv2.GaussianBlur(masked, (9, 9), 2)
+    def detect_brick(self, blob_mask: np.ndarray, depth: np.ndarray,
+                     rgb_shape: tuple):
+        """
+        Detect a brick from its colour blob.
 
-        circles = cv2.HoughCircles(
-            blurred, cv2.HOUGH_GRADIENT,
-            dp=1, minDist=STUD_MIN_DIST_PX,
-            param1=50, param2=20,
-            minRadius=STUD_MIN_RADIUS_PX,
-            maxRadius=STUD_MAX_RADIUS_PX,
-        )
-        if circles is None:
+        1. Find the largest contour in blob_mask.
+        2. Fit a minAreaRect → centroid pixel, long-axis angle.
+        3. Infer shape from physical footprint (3D primary, 2D fallback).
+
+        Returns ([(cx_px, cy_px)], (rows, cols), angle_deg) or None.
+        The centroid is returned as a single-element list so compute_3d_pose
+        (which averages a list of pixel coords) works without modification.
+        """
+        contours, _ = cv2.findContours(blob_mask, cv2.RETR_EXTERNAL,
+                                       cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
             return None
 
-        circles      = np.round(circles[0]).astype(int)
-        stud_centers = [(c[0], c[1]) for c in circles]
-        return stud_centers, self.infer_brick_shape(stud_centers), self.infer_brick_angle(stud_centers)
+        largest = max(contours, key=cv2.contourArea)
+        if cv2.contourArea(largest) < BLOB_MIN_AREA_PX:
+            return None
 
-    def infer_brick_shape(self, stud_centers: list) -> tuple:
-        """Determine (rows, cols) from stud positions using PCA."""
-        n = len(stud_centers)
-        if n == 0: return (0, 0)
-        if n == 1: return (1, 1)
+        rect = cv2.minAreaRect(largest)
+        (cx_px, cy_px), (w_px, h_px), angle = rect
 
-        pts = np.array(stud_centers, dtype=np.float32)
-        mean, evec, _ = cv2.PCACompute2(pts, mean=None)
-        proj = cv2.PCAProject(pts, mean, evec)
+        # minAreaRect convention: width is along `angle`, height is perpendicular.
+        # Ensure (w_px, angle) always describe the LONG axis so cols ≥ rows.
+        if w_px < h_px:
+            w_px, h_px = h_px, w_px
+            angle += 90.0
 
-        def count_axis(coords):
-            if len(coords) < 2: return 1
-            s = np.sort(coords)
-            gaps = np.diff(s)
-            sig  = gaps[gaps > 3.0]
-            if len(sig) == 0: return 1
-            return max(1, round((s[-1] - s[0]) / float(np.min(sig))) + 1)
+        # Infer shape — try point cloud first, fall back to 2D
+        shape = self._shape_from_pointcloud(blob_mask, rgb_shape)
+        if shape is None:
+            shape = self._shape_from_blob_2d(w_px, h_px, cx_px, cy_px, depth)
 
-        return (count_axis(proj[:, 1]), count_axis(proj[:, 0]))   # (rows, cols)
+        centroid = [(int(cx_px), int(cy_px))]
+        return centroid, shape, angle
 
-    def infer_brick_angle(self, stud_centers: list) -> float:
-        """Return orientation angle (deg) of brick long axis vs image x-axis."""
-        if len(stud_centers) < 2: return 0.0
-        pts = np.array(stud_centers, dtype=np.float32)
-        _, evec, _ = cv2.PCACompute2(pts, mean=None)
-        return float(np.degrees(np.arctan2(evec[0, 1], evec[0, 0])))
+    def _shape_from_pointcloud(self, blob_mask: np.ndarray,
+                                rgb_shape: tuple):
+        """
+        Infer brick shape by projecting its 3D point cluster onto the fitted
+        ground plane, then measuring the cluster's XY extent along its two
+        principal axes and snapping to the nearest Duplo stud count.
+
+        Returns (rows, cols) or None if the point cloud / ground plane is
+        unavailable or the cluster is too small.
+        """
+        if self.latest_xyz is None or self.ground_plane is None:
+            return None
+
+        H_pc, W_pc = self.latest_xyz.shape[:2]
+        H_rgb, W_rgb = rgb_shape[:2]
+
+        if (H_pc, W_pc) != (H_rgb, W_rgb):
+            mask_pc = cv2.resize(blob_mask, (W_pc, H_pc),
+                                 interpolation=cv2.INTER_NEAREST)
+        else:
+            mask_pc = blob_mask
+
+        cluster = self.latest_xyz[mask_pc > 0]
+        valid   = cluster[np.all(np.isfinite(cluster), axis=1)]
+
+        if len(valid) < MIN_CLUSTER_PTS:
+            return None
+
+        normal, _ = self.ground_plane
+
+        # Build an orthonormal basis for the ground plane so we can work in 2D.
+        # v1, v2 span the plane; normal is the out-of-plane direction.
+        ref = np.array([1.0, 0.0, 0.0]) if abs(normal[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+        v1  = np.cross(normal, ref);  v1 /= np.linalg.norm(v1)
+        v2  = np.cross(normal, v1);   v2 /= np.linalg.norm(v2)
+
+        # Project cluster onto the plane (2D coordinates in the plane's frame)
+        proj = np.column_stack([valid @ v1, valid @ v2])
+
+        # PCA on the 2D projections → principal axes and their extents
+        centered = proj - proj.mean(axis=0)
+        _, _, Vt = np.linalg.svd(centered, full_matrices=False)
+        proj_pca = centered @ Vt.T          # rotate to PCA frame
+
+        long_m  = float(proj_pca[:, 0].max() - proj_pca[:, 0].min())
+        short_m = float(proj_pca[:, 1].max() - proj_pca[:, 1].min())
+
+        cols = max(1, min(8, round(long_m  / STUD_PITCH_M)))
+        rows = max(1, min(4, round(short_m / STUD_PITCH_M)))
+
+        return (rows, cols)
+
+    def _shape_from_blob_2d(self, w_px: float, h_px: float,
+                             cx_px: float, cy_px: float,
+                             depth: np.ndarray):
+        """
+        Fallback shape inference from the 2D bounding-box pixel size.
+
+        Converts pixel dimensions to meters using the brick's depth and
+        the camera focal length, then snaps to the Duplo stud grid.
+        """
+        ci, ri  = int(cx_px), int(cy_px)
+        dh, dw  = depth.shape
+        window  = depth[max(0, ri-3):min(dh, ri+4),
+                        max(0, ci-3):min(dw, ci+4)]
+        valid   = window[(window > 0) & np.isfinite(window)]
+        if len(valid) == 0:
+            return (1, 1)
+        Z = float(np.median(valid))
+
+        f_avg   = (self.fx + self.fy) / 2.0
+        long_m  = w_px * Z / f_avg   # w_px is guaranteed ≥ h_px (long axis)
+        short_m = h_px * Z / f_avg
+
+        cols = max(1, min(8, round(long_m  / STUD_PITCH_M)))
+        rows = max(1, min(4, round(short_m / STUD_PITCH_M)))
+
+        return (rows, cols)
 
     def compute_3d_pose(self, stud_centers: list, angle_deg: float,
                         depth: np.ndarray) -> Pose:
@@ -771,19 +908,32 @@ class BrickDetectorNode(Node):
 
         self.marker_pub.publish(markers)
 
-    def draw_detection(self, img, stud_centers, color_name, brick_shape,
-                       height_type, height_m):
-        """Annotate the 2D debug image with stud circles and brick info."""
-        for (x, y) in stud_centers:
-            cv2.circle(img, (x, y), STUD_MAX_RADIUS_PX, (0, 255, 0), 2)
-        if stud_centers:
-            cx  = int(np.mean([c[0] for c in stud_centers]))
-            cy  = int(np.mean([c[1] for c in stud_centers]))
-            br, bc = brick_shape
-            label = (f'{color_name} {br}x{bc} [{height_type}] '
-                     f'{height_m*1000:.0f}mm')
-            cv2.putText(img, label, (cx - 20, cy - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    def draw_detection(self, img: np.ndarray, blob_mask: np.ndarray,
+                       color_name: str, brick_shape: tuple,
+                       height_type: str, height_m: float):
+        """
+        Annotate the 2D debug image with:
+          - Rotated bounding box of the detected blob (green)
+          - Label: colour, shape, height type, measured height in mm
+        """
+        contours, _ = cv2.findContours(blob_mask, cv2.RETR_EXTERNAL,
+                                       cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return
+
+        largest = max(contours, key=cv2.contourArea)
+        rect    = cv2.minAreaRect(largest)
+        box     = np.int0(cv2.boxPoints(rect))
+
+        cv2.drawContours(img, [box], 0, (0, 255, 0), 2)
+
+        cx, cy = int(rect[0][0]), int(rect[0][1])
+        br, bc = brick_shape
+        label  = f'{color_name} {br}x{bc} [{height_type}] {height_m*1000:.0f}mm'
+        cv2.putText(img, label, (cx - 30, cy - 12),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.50, (255, 255, 255), 1)
+        # Small dot at the centroid so the TCP target point is visible
+        cv2.circle(img, (cx, cy), 4, (0, 255, 255), -1)
 
 
 # ---------------------------------------------------------------------------
