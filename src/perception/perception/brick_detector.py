@@ -103,7 +103,7 @@ class BrickDetectorNode(Node):
         self.tf_listener    = tf2_ros.TransformListener(self.tf_buffer, self)
         self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
         # Override via ROS param if the frame name differs on your hardware
-        self.declare_parameter('camera_frame', 'camera_color_optical_frame')
+        self.declare_parameter('camera_frame', 'camera_depth_optical_frame')
 
         self.create_timer(0.2, self.process)
         self.get_logger().info('BrickDetectorNode initialized.')

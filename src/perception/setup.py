@@ -24,8 +24,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'brick_detector=brick_detector:main',
-            'camera_transform=static_tf_transform:main',
+            'brick_detector=perception.brick_detector:main',
+            'camera_transform=perception.static_tf_transform:main',
         ],
     },
 )
