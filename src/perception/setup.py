@@ -26,6 +26,7 @@ setup(
         'console_scripts': [
             'brick_detector=perception.brick_detector:main',
             'camera_transform=perception.static_tf_transform:main',
+            'hsv_tuner=perception.hsv_tuner:main',
         ],
     },
 )

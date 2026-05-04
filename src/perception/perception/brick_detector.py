@@ -2,36 +2,35 @@
 brick_detector.py
 
 Workflow:
-  1. Subscribe to RealSense RGB + depth topics
-  2. Color segmentation (HSV) -> per-color blobs
-  3. Depth discontinuity -> split touching same-color bricks
-  4. Stud detection (HoughCircles) -> brick shape + orientation
-  5. Back-project centroid to 3D using camera intrinsics + depth
-  6. Estimate brick height type (half / normal / tall) from depth vs baseplate
-  7. Publish detected brick poses (centroid, in base_link) + metadata
-  8. Publish RViz MarkerArray for live 3D visualization
+  1. Subscribe to RealSense RGB, depth, camera_info, and XYZRGB point cloud
+  2. Color segmentation (HSV on RGB image) -> per-color blobs
+  3. Point cloud: RANSAC plane fit -> ground plane (baseplate surface)
+  4. Depth discontinuity -> split touching same-color blobs
+  5. Stud detection (HoughCircles) -> brick shape + orientation
+  6. Back-project centroid to 3D using camera intrinsics + depth
+  7. Height = 90th-percentile Z of blob's point cluster above ground plane
+     (falls back to single-pixel depth if point cloud is unavailable)
+  8. Publish poses, metadata, RViz markers, 2D debug image
+
+Why point cloud for height?
+  RealSense depth noise at 0.5-1m is ±3-8mm per pixel. Our thinnest brick
+  (half-height) is only 9.6mm, so a single-pixel sample is unreliable.
+  Averaging hundreds of points per cluster and fitting the ground plane with
+  RANSAC reduces effective height error to <2mm.
 
 ROS2 Topics:
   Subscribed:
     /camera/camera/color/image_raw        (sensor_msgs/Image)
     /camera/camera/depth/image_rect_raw   (sensor_msgs/Image)
     /camera/camera/color/camera_info      (sensor_msgs/CameraInfo)
+    /camera/camera/depth/color/points     (sensor_msgs/PointCloud2)
   Published:
-    /detected_bricks                      (geometry_msgs/PoseArray)
-      Poses are the CENTROID of each brick's top surface in base_link.
-    /detected_bricks_meta                 (std_msgs/String)
-      JSON array — one entry per pose: {color, shape, height_type}
-    /brick_debug_image                    (sensor_msgs/Image)   [2D visualization]
-    /duplo_markers                        (visualization_msgs/MarkerArray)
-      - Baseplate flat box     (ns: 'baseplate', id 0)
-      - Stud grid lines        (ns: 'baseplate', id 1)
-      - One box per brick      (ns: 'bricks',    id 0..N)
-      - Text label per brick   (ns: 'brick_labels', id 0..N)
+    /detected_bricks        (geometry_msgs/PoseArray)   — centroid in base_link
+    /detected_bricks_meta   (std_msgs/String)            — JSON: color, shape, height_type, height_m
+    /brick_debug_image      (sensor_msgs/Image)          — 2D annotated view
+    /duplo_markers          (visualization_msgs/MarkerArray) — RViz 3D view
   TF Broadcast:
-    baseplate_frame  (child of base_link) — published as STATIC once detected
-    All TF lookups use rclpy.time.Time() with a timeout so static transforms
-    (e.g. camera_frame -> base_link from a static_transform_publisher) are
-    correctly resolved even immediately after node startup.
+    baseplate_frame (static, child of base_link)
 """
 
 import json
@@ -44,7 +43,7 @@ import cv2
 import numpy as np
 from cv_bridge import CvBridge
 
-from sensor_msgs.msg import Image, CameraInfo
+from sensor_msgs.msg import Image, CameraInfo, PointCloud2
 from geometry_msgs.msg import Pose, PoseArray, Point, TransformStamped
 from std_msgs.msg import Header, String
 from visualization_msgs.msg import Marker, MarkerArray
@@ -55,32 +54,27 @@ from scipy.spatial.transform import Rotation
 
 
 # ---------------------------------------------------------------------------
-# HSV color ranges for Duplo brick detection
-# Format: list of (lower_hsv, upper_hsv) — ranges are OR'd together.
-# OpenCV convention: H 0-179, S 0-255, V 0-255.
-# Starting values calibrated from the physical brick set under indoor LED
-# lighting — tune after testing with your camera.
+# HSV color ranges — calibrated from physical brick set under indoor LED
+# lighting.  These WILL need tuning with your actual camera.  A good workflow:
+#   1. Run the node and open /brick_debug_image in rqt_image_view
+#   2. Adjust lower/upper bounds until each colour mask isolates cleanly
+#   3. OpenCV convention: H 0-179, S 0-255, V 0-255
 # ---------------------------------------------------------------------------
 COLOR_RANGES = {
-    # Red wraps around H=0/179 in OpenCV HSV — needs two ranges.
+    # Red wraps around H=0/179 — needs two ranges.
     'red':         [((0,   160,  80), (8,   255, 210)),
                     ((172, 160,  80), (179, 255, 210))],
     'orange':      [((5,   200, 150), (15,  255, 235))],
-    # Yellow and orange are close in hue; saturation floor separates them.
     'yellow':      [((20,  150, 150), (35,  255, 240))],
-    # Light green (lime) bricks — distinct from the dark green baseplate.
     'light_green': [((35,  120,  80), (55,  255, 210))],
-    # Sky blue — medium-high saturation, clearly blue hue.
     'sky_blue':    [((95,  150, 140), (115, 255, 235))],
-    # Mint — lighter, less saturated than sky_blue, shifted slightly green.
     'mint':        [((80,   50, 170), (95,  140, 235))],
-    # White — saturation-based only; hue is irrelevant for near-white bricks.
     'white':       [((0,     0, 200), (179,  50, 255))],
     'purple':      [((130,  60,  90), (155, 180, 185))],
 }
 
 # ---------------------------------------------------------------------------
-# RViz marker colors — (R, G, B, A) floats 0-1 per color name
+# RViz marker colours (R, G, B, A) per colour name
 # ---------------------------------------------------------------------------
 BRICK_COLORS_RGBA = {
     'red':         (1.00, 0.15, 0.15, 1.0),
@@ -94,8 +88,8 @@ BRICK_COLORS_RGBA = {
 }
 
 # ---------------------------------------------------------------------------
-# Baseplate HSV range — tuned to the dark green Duplo baseplate.
-# Darker and more saturated than the light green bricks.
+# Baseplate HSV — used for 2D debug overlay only.
+# Ground plane is now found via RANSAC on the point cloud.
 # ---------------------------------------------------------------------------
 BASEPLATE_HSV_LOWER   = (55,  80,  30)
 BASEPLATE_HSV_UPPER   = (80, 200, 100)
@@ -104,35 +98,47 @@ BASEPLATE_MIN_AREA_PX = 5000
 # ---------------------------------------------------------------------------
 # Duplo physical constants (meters)
 # ---------------------------------------------------------------------------
-STUD_PITCH_M   = 0.016    # 16 mm between stud centres
+STUD_PITCH_M   = 0.016
 BASEPLATE_ROWS = 16
 BASEPLATE_COLS = 16
 
 BRICK_HEIGHTS = {
-    'half':   0.0096,    #  9.6 mm — Duplo flat / plate
-    'normal': 0.0192,    # 19.2 mm — standard Duplo brick
-    'tall':   0.0384,    # 38.4 mm — 2× standard (confirmed)
+    'half':   0.0096,
+    'normal': 0.0192,
+    'tall':   0.0384,
 }
 
-# ---------------------------------------------------------------------------
-# Brick height classification (meters above baseplate surface)
-# Thresholds set at midpoints between adjacent heights.
-# ---------------------------------------------------------------------------
+# Height classification thresholds (meters above ground plane).
+# Midpoints between adjacent brick heights.
 HEIGHT_THRESHOLDS = {
-    'half':   (0.000, 0.013),   #  0 – 13 mm
-    'normal': (0.013, 0.030),   # 13 – 30 mm
-    'tall':   (0.030, 9.999),   # > 30 mm
+    'half':   (0.000, 0.013),
+    'normal': (0.013, 0.030),
+    'tall':   (0.030, 9.999),
 }
 
 # ---------------------------------------------------------------------------
-# Stud detection constants — tune empirically once camera height is fixed.
-# Duplo stud pitch 16 mm, stud diameter ~9 mm.
+# Stud detection
 # ---------------------------------------------------------------------------
 STUD_MIN_RADIUS_PX = 5
 STUD_MAX_RADIUS_PX = 20
 STUD_MIN_DIST_PX   = 15
 
-# How long to wait for a TF transform before giving up.
+# ---------------------------------------------------------------------------
+# Point cloud / RANSAC parameters
+# ---------------------------------------------------------------------------
+# Keep every Nth point for RANSAC — 640×480 / 8 ≈ 38 k points, fast enough.
+PC_SUBSAMPLE          = 8
+RANSAC_ITERATIONS     = 100
+# Points within this distance of the fitted plane count as inliers.
+RANSAC_INLIER_THRESH  = 0.008   # 8 mm
+# Ground plane normal must be mostly vertical in camera frame (|n_z| > this).
+PLANE_NORMAL_MIN_Z    = 0.85
+# Use this percentile of cluster depths as the brick top surface.
+# 90th percentile rejects a few noisy high points without discarding valid ones.
+HEIGHT_PERCENTILE     = 90
+# Minimum number of valid cluster points required to trust height estimate.
+MIN_CLUSTER_PTS       = 15
+
 TF_TIMEOUT_SEC = 1.0
 
 
@@ -142,25 +148,34 @@ class BrickDetectorNode(Node):
         super().__init__('brick_detector')
         self.bridge = CvBridge()
 
-        # Camera intrinsics (filled by camera_info_callback)
         self.fx = self.fy = self.cx = self.cy = None
-
         self.latest_rgb   = None
         self.latest_depth = None
 
-        # Baseplate surface depth in camera frame — used for height typing.
+        # Point cloud as H×W×3 float32 numpy array (NaN where invalid).
+        self.latest_xyz   = None
+
+        # Fitted ground plane: (normal_vec [3], d) satisfying normal·p + d = 0.
+        # Normal points away from camera (positive Z in camera frame).
+        # Height above plane = -(normal·p + d).
+        self.ground_plane = None
+
+        # Fallback: baseplate surface Z in camera frame (single-pixel method).
         self.baseplate_z_cam = None
 
         # --- Subscribers ---
         self.create_subscription(
-            Image,      '/camera/camera/color/image_raw',
+            Image,        '/camera/camera/color/image_raw',
             self.rgb_callback, 10)
         self.create_subscription(
-            Image,      '/camera/camera/depth/image_rect_raw',
+            Image,        '/camera/camera/depth/image_rect_raw',
             self.depth_callback, 10)
         self.create_subscription(
-            CameraInfo, '/camera/camera/color/camera_info',
+            CameraInfo,   '/camera/camera/color/camera_info',
             self.camera_info_callback, 10)
+        self.create_subscription(
+            PointCloud2,  '/camera/camera/depth/color/points',
+            self.pointcloud_callback, 10)
 
         # --- Publishers ---
         self.pose_pub   = self.create_publisher(PoseArray,   '/detected_bricks',      10)
@@ -169,14 +184,9 @@ class BrickDetectorNode(Node):
         self.marker_pub = self.create_publisher(MarkerArray, '/duplo_markers',        10)
 
         # --- TF ---
-        self.tf_buffer   = tf2_ros.Buffer()
-        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
-
-        # Dynamic broadcaster (kept for future per-cycle dynamic frames).
-        self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
-
-        # Static broadcaster for baseplate_frame — latches so the frame
-        # persists if the baseplate is temporarily occluded.
+        self.tf_buffer             = tf2_ros.Buffer()
+        self.tf_listener           = tf2_ros.TransformListener(self.tf_buffer, self)
+        self.tf_broadcaster        = tf2_ros.TransformBroadcaster(self)
         self.static_tf_broadcaster = tf2_ros.StaticTransformBroadcaster(self)
 
         self.declare_parameter('camera_frame', 'camera_depth_optical_frame')
@@ -189,10 +199,8 @@ class BrickDetectorNode(Node):
     # -----------------------------------------------------------------------
 
     def camera_info_callback(self, msg: CameraInfo):
-        self.fx = msg.k[0]
-        self.fy = msg.k[4]
-        self.cx = msg.k[2]
-        self.cy = msg.k[5]
+        self.fx = msg.k[0];  self.fy = msg.k[4]
+        self.cx = msg.k[2];  self.cy = msg.k[5]
 
     def rgb_callback(self, msg: Image):
         self.latest_rgb = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
@@ -200,6 +208,10 @@ class BrickDetectorNode(Node):
     def depth_callback(self, msg: Image):
         depth_mm = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
         self.latest_depth = depth_mm.astype(np.float32) / 1000.0
+
+    def pointcloud_callback(self, msg: PointCloud2):
+        """Unpack the RealSense organised XYZRGB point cloud into H×W×3 float32."""
+        self.latest_xyz = self._unpack_pointcloud(msg)
 
     # -----------------------------------------------------------------------
     # Main processing loop
@@ -216,17 +228,25 @@ class BrickDetectorNode(Node):
         depth = self.latest_depth.copy()
         debug = rgb.copy()
 
-        # Detect baseplate and broadcast its static TF frame
+        # ── Ground plane via RANSAC on point cloud ──────────────────────────
+        # This replaces the fragile single-pixel baseplate depth reference.
+        # Runs every cycle so it stays current if the camera moves.
+        if self.latest_xyz is not None:
+            gp = self._fit_ground_plane(self.latest_xyz)
+            if gp is not None:
+                self.ground_plane = gp
+
+        # ── Baseplate 2D detection (debug overlay + TF only) ────────────────
         bp = self.detect_baseplate(rgb, depth)
         if bp is not None:
             X, Y, Z, angle_deg, box_pts = bp
-            self.baseplate_z_cam = Z
+            self.baseplate_z_cam = Z   # fallback if point cloud unavailable
             self.publish_baseplate_tf(X, Y, Z, angle_deg)
             cv2.drawContours(debug, [box_pts], 0, (0, 200, 0), 2)
             cv2.putText(debug, 'baseplate', tuple(box_pts[0]),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 0), 2)
 
-        all_bricks = []   # {color, shape, height_type, pose (camera frame)}
+        all_bricks = []
 
         for color_name, ranges in COLOR_RANGES.items():
             mask   = self.color_segment(rgb, ranges)
@@ -242,25 +262,186 @@ class BrickDetectorNode(Node):
                 if pose_cam is None:
                     continue
 
-                height_type = self._estimate_height_type(pose_cam.position.z)
+                # Height from point cloud cluster (falls back to single-pixel)
+                height_m, height_type = self._brick_height(block_mask, rgb.shape,
+                                                           pose_cam.position.z)
 
                 all_bricks.append({
                     'color':       color_name,
                     'shape':       brick_shape,
                     'height_type': height_type,
+                    'height_m':    height_m,
                     'pose':        pose_cam,
                 })
 
                 self.draw_detection(debug, stud_centers, color_name,
-                                    brick_shape, height_type)
+                                    brick_shape, height_type, height_m)
 
-        # Transform to base_link once; use result for both PoseArray and markers
         bricks_base = self.publish_poses(all_bricks)
         self.publish_markers(bricks_base)
         self.debug_pub.publish(self.bridge.cv2_to_imgmsg(debug, encoding='bgr8'))
 
     # -----------------------------------------------------------------------
-    # Detection helpers
+    # Point cloud helpers
+    # -----------------------------------------------------------------------
+
+    def _unpack_pointcloud(self, msg: PointCloud2) -> np.ndarray:
+        """
+        Unpack an organised RealSense PointCloud2 into an H×W×3 float32 array.
+
+        The RealSense XYZRGB cloud has point_step=32 with X,Y,Z as float32 at
+        byte offsets 0, 4, 8.  We read the field offsets from the message so
+        this works even if the layout varies between driver versions.
+        """
+        H, W     = msg.height, msg.width
+        step     = msg.point_step
+        n_floats = step // 4   # floats per point (step is always a multiple of 4)
+
+        fields = {f.name: f.offset // 4 for f in msg.fields}   # offset in float32 units
+
+        data = np.frombuffer(msg.data, dtype=np.float32).reshape(H * W, n_floats)
+
+        x = data[:, fields['x']].reshape(H, W)
+        y = data[:, fields['y']].reshape(H, W)
+        z = data[:, fields['z']].reshape(H, W)
+
+        xyz = np.stack([x, y, z], axis=2)
+        xyz[~np.isfinite(xyz)] = np.nan
+        return xyz
+
+    def _fit_ground_plane(self, xyz: np.ndarray):
+        """
+        Fit a ground plane to the point cloud using RANSAC.
+
+        Only considers planes whose normal is mostly along the camera Z axis
+        (|n_z| > PLANE_NORMAL_MIN_Z), ensuring we find the flat baseplate/table
+        rather than a vertical surface.
+
+        Returns (normal, d) where normal·p + d = 0, normal points away from
+        the camera (positive Z component).  Height above plane = -(normal·p + d).
+        Returns None if fewer than 100 valid points or no plane is found.
+        """
+        # Subsample for speed
+        pts_full = xyz.reshape(-1, 3)
+        pts      = pts_full[::PC_SUBSAMPLE]
+        valid    = pts[np.all(np.isfinite(pts), axis=1)]
+
+        if len(valid) < 100:
+            return None
+
+        best_normal   = None
+        best_d        = None
+        best_inliers  = 0
+
+        rng = np.random.default_rng()   # seeded per call — reproducible within session
+
+        for _ in range(RANSAC_ITERATIONS):
+            idx = rng.choice(len(valid), 3, replace=False)
+            p0, p1, p2 = valid[idx]
+
+            normal = np.cross(p1 - p0, p2 - p0)
+            norm   = np.linalg.norm(normal)
+            if norm < 1e-6:
+                continue
+            normal /= norm
+
+            # Ground plane normal must be mostly along camera Z axis
+            if abs(normal[2]) < PLANE_NORMAL_MIN_Z:
+                continue
+
+            # Ensure normal points away from camera (positive Z)
+            if normal[2] < 0:
+                normal = -normal
+
+            d = -np.dot(normal, p0)
+
+            dists     = np.abs(valid @ normal + d)
+            n_inliers = int(np.sum(dists < RANSAC_INLIER_THRESH))
+
+            if n_inliers > best_inliers:
+                best_inliers = n_inliers
+                best_normal  = normal
+                best_d       = d
+
+        if best_normal is None or best_inliers < 50:
+            return None
+
+        # Refine: refit to all inliers
+        dists   = np.abs(valid @ best_normal + best_d)
+        inliers = valid[dists < RANSAC_INLIER_THRESH]
+        if len(inliers) >= 3:
+            # Least-squares plane through inliers
+            centroid = inliers.mean(axis=0)
+            _, _, Vt = np.linalg.svd(inliers - centroid)
+            normal   = Vt[-1]
+            if normal[2] < 0:
+                normal = -normal
+            d = -np.dot(normal, centroid)
+            best_normal, best_d = normal, d
+
+        self.get_logger().debug(
+            f'Ground plane: normal={best_normal.round(3)}, d={best_d:.4f}, '
+            f'inliers={best_inliers}'
+        )
+        return best_normal, best_d
+
+    def _brick_height(self, blob_mask: np.ndarray, rgb_shape: tuple,
+                      fallback_z_cam: float) -> tuple:
+        """
+        Estimate brick height above the ground plane.
+
+        Primary method — point cloud cluster:
+          1. Resize blob_mask to match point cloud dimensions if needed.
+          2. Extract XYZ points within the mask.
+          3. Compute height above fitted ground plane for each point.
+          4. Use HEIGHT_PERCENTILE to get the brick top surface (rejects a few
+             noisy outliers without discarding valid points).
+
+        Fallback — single-pixel depth (used when point cloud or plane is absent):
+          Uses the legacy baseplate_z_cam reference depth.
+
+        Returns (height_m, height_type).
+        """
+        if self.latest_xyz is not None and self.ground_plane is not None:
+            H_pc, W_pc = self.latest_xyz.shape[:2]
+            H_rgb, W_rgb = rgb_shape[:2]
+
+            if (H_pc, W_pc) != (H_rgb, W_rgb):
+                mask_pc = cv2.resize(blob_mask, (W_pc, H_pc),
+                                     interpolation=cv2.INTER_NEAREST)
+            else:
+                mask_pc = blob_mask
+
+            cluster = self.latest_xyz[mask_pc > 0]
+            valid   = cluster[np.all(np.isfinite(cluster), axis=1)]
+
+            if len(valid) >= MIN_CLUSTER_PTS:
+                normal, d = self.ground_plane
+                # Height above plane: positive = brick sits above the plane
+                heights = -(valid @ normal + d)
+                heights = heights[heights > 0]
+
+                if len(heights) >= MIN_CLUSTER_PTS // 2:
+                    height_m = float(np.percentile(heights, HEIGHT_PERCENTILE))
+                    return height_m, self._classify_height(height_m)
+
+        # Fallback: compare single centroid depth to baseplate reference
+        if self.baseplate_z_cam is not None:
+            height_m = max(0.0, self.baseplate_z_cam - fallback_z_cam)
+        else:
+            height_m = BRICK_HEIGHTS['normal']   # last-resort default
+
+        return height_m, self._classify_height(height_m)
+
+    def _classify_height(self, height_m: float) -> str:
+        """Map a measured height in meters to 'half', 'normal', or 'tall'."""
+        for label, (lo, hi) in HEIGHT_THRESHOLDS.items():
+            if lo <= height_m < hi:
+                return label
+        return 'normal'
+
+    # -----------------------------------------------------------------------
+    # Color / blob helpers
     # -----------------------------------------------------------------------
 
     def color_segment(self, rgb: np.ndarray, ranges: list) -> np.ndarray:
@@ -270,16 +451,13 @@ class BrickDetectorNode(Node):
         for lower, upper in ranges:
             mask = cv2.bitwise_or(mask,
                                   cv2.inRange(hsv, np.array(lower), np.array(upper)))
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        mask   = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  kernel)
-        mask   = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        k    = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
         return mask
 
     def split_by_depth(self, color_mask: np.ndarray, depth: np.ndarray) -> list:
-        """
-        Split a color mask into individual brick blobs using depth discontinuities.
-        A depth step of ~20 mm between adjacent pixels signals a brick boundary.
-        """
+        """Split a colour mask into individual brick blobs via depth discontinuities."""
         DEPTH_EDGE_THRESH = 0.02
         blobs = []
         num_labels, labels = cv2.connectedComponents(color_mask)
@@ -288,33 +466,32 @@ class BrickDetectorNode(Node):
             blob = (labels == label).astype(np.uint8) * 255
 
             depth_in_blob = np.where(blob > 0, depth, 0.0).astype(np.float32)
-            grad_x   = cv2.Sobel(depth_in_blob, cv2.CV_32F, 1, 0, ksize=3)
-            grad_y   = cv2.Sobel(depth_in_blob, cv2.CV_32F, 0, 1, ksize=3)
-            grad_mag = np.sqrt(grad_x**2 + grad_y**2)
+            gx      = cv2.Sobel(depth_in_blob, cv2.CV_32F, 1, 0, ksize=3)
+            gy      = cv2.Sobel(depth_in_blob, cv2.CV_32F, 0, 1, ksize=3)
+            edges   = ((np.sqrt(gx**2 + gy**2) > DEPTH_EDGE_THRESH) & (blob > 0)).astype(np.uint8) * 255
+            split   = cv2.bitwise_and(blob, cv2.bitwise_not(edges))
 
-            depth_edges = ((grad_mag > DEPTH_EDGE_THRESH) & (blob > 0)).astype(np.uint8) * 255
-            split_mask  = cv2.bitwise_and(blob, cv2.bitwise_not(depth_edges))
+            k     = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            split = cv2.morphologyEx(split, cv2.MORPH_CLOSE, k)
 
-            kernel     = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-            split_mask = cv2.morphologyEx(split_mask, cv2.MORPH_CLOSE, kernel)
-
-            num_sub, sub_labels = cv2.connectedComponents(split_mask)
-            if num_sub <= 2:
+            n_sub, sub_labels = cv2.connectedComponents(split)
+            if n_sub <= 2:
                 blobs.append(blob)
             else:
-                for sub_label in range(1, num_sub):
-                    blobs.append((sub_labels == sub_label).astype(np.uint8) * 255)
+                for s in range(1, n_sub):
+                    blobs.append((sub_labels == s).astype(np.uint8) * 255)
 
         return blobs
 
+    # -----------------------------------------------------------------------
+    # Stud detection
+    # -----------------------------------------------------------------------
+
     def detect_studs(self, rgb: np.ndarray, blob_mask: np.ndarray):
-        """
-        Detect studs within a single brick blob using HoughCircles.
-        Returns (stud_centers, brick_shape, angle_deg) or None on failure.
-        """
-        gray        = cv2.cvtColor(rgb, cv2.COLOR_BGR2GRAY)
-        gray_masked = cv2.bitwise_and(gray, gray, mask=blob_mask)
-        blurred     = cv2.GaussianBlur(gray_masked, (9, 9), 2)
+        """Detect studs via HoughCircles. Returns (centers, shape, angle) or None."""
+        gray    = cv2.cvtColor(rgb, cv2.COLOR_BGR2GRAY)
+        masked  = cv2.bitwise_and(gray, gray, mask=blob_mask)
+        blurred = cv2.GaussianBlur(masked, (9, 9), 2)
 
         circles = cv2.HoughCircles(
             blurred, cv2.HOUGH_GRADIENT,
@@ -326,350 +503,117 @@ class BrickDetectorNode(Node):
         if circles is None:
             return None
 
-        circles      = np.round(circles[0, :]).astype(int)
+        circles      = np.round(circles[0]).astype(int)
         stud_centers = [(c[0], c[1]) for c in circles]
-        brick_shape  = self.infer_brick_shape(stud_centers)
-        angle_deg    = self.infer_brick_angle(stud_centers)
-        return stud_centers, brick_shape, angle_deg
+        return stud_centers, self.infer_brick_shape(stud_centers), self.infer_brick_angle(stud_centers)
 
     def infer_brick_shape(self, stud_centers: list) -> tuple:
-        """Determine brick shape (rows, cols) from stud positions via PCA."""
+        """Determine (rows, cols) from stud positions using PCA."""
         n = len(stud_centers)
-        if n == 0:
-            return (0, 0)
-        if n == 1:
-            return (1, 1)
+        if n == 0: return (0, 0)
+        if n == 1: return (1, 1)
 
         pts = np.array(stud_centers, dtype=np.float32)
-        mean, eigenvectors, _ = cv2.PCACompute2(pts, mean=None)
-        proj = cv2.PCAProject(pts, mean, eigenvectors)
+        mean, evec, _ = cv2.PCACompute2(pts, mean=None)
+        proj = cv2.PCAProject(pts, mean, evec)
 
-        def count_grid_positions(coords: np.ndarray) -> int:
-            if len(coords) < 2:
-                return 1
-            sorted_c    = np.sort(coords)
-            diffs       = np.diff(sorted_c)
-            significant = diffs[diffs > 3.0]
-            if len(significant) == 0:
-                return 1
-            pitch = float(np.min(significant))
-            span  = float(sorted_c[-1] - sorted_c[0])
-            return max(1, round(span / pitch) + 1)
+        def count_axis(coords):
+            if len(coords) < 2: return 1
+            s = np.sort(coords)
+            gaps = np.diff(s)
+            sig  = gaps[gaps > 3.0]
+            if len(sig) == 0: return 1
+            return max(1, round((s[-1] - s[0]) / float(np.min(sig))) + 1)
 
-        ncols = count_grid_positions(proj[:, 0])   # long axis
-        nrows = count_grid_positions(proj[:, 1])   # short axis
-        return (nrows, ncols)
+        return (count_axis(proj[:, 1]), count_axis(proj[:, 0]))   # (rows, cols)
 
     def infer_brick_angle(self, stud_centers: list) -> float:
-        """Return orientation angle (degrees) of brick long axis vs image x-axis."""
-        if len(stud_centers) < 2:
-            return 0.0
+        """Return orientation angle (deg) of brick long axis vs image x-axis."""
+        if len(stud_centers) < 2: return 0.0
         pts = np.array(stud_centers, dtype=np.float32)
-        mean, eigenvectors, _ = cv2.PCACompute2(pts, mean=None)
-        return np.degrees(np.arctan2(eigenvectors[0, 1], eigenvectors[0, 0]))
+        _, evec, _ = cv2.PCACompute2(pts, mean=None)
+        return float(np.degrees(np.arctan2(evec[0, 1], evec[0, 0])))
 
     def compute_3d_pose(self, stud_centers: list, angle_deg: float,
                         depth: np.ndarray) -> Pose:
-        """
-        Back-project the brick CENTROID (mean of stud centers) to 3D camera frame.
-        Returns a Pose in camera frame, or None on failure.
-        """
-        if not stud_centers:
-            return None
+        """Back-project brick centroid to 3D camera frame."""
+        if not stud_centers: return None
 
-        u, v      = np.mean([c[0] for c in stud_centers]), np.mean([c[1] for c in stud_centers])
-        u_int, v_int = int(u), int(v)
+        u, v = (np.mean([c[0] for c in stud_centers]),
+                np.mean([c[1] for c in stud_centers]))
+        ui, vi = int(u), int(v)
 
-        h, w    = depth.shape
-        half    = 2
-        y0, y1  = max(0, v_int - half), min(h, v_int + half + 1)
-        x0, x1  = max(0, u_int - half), min(w, u_int + half + 1)
-        window  = depth[y0:y1, x0:x1]
-        valid   = window[(window > 0) & ~np.isnan(window)]
+        h, w   = depth.shape
+        half   = 2
+        window = depth[max(0,vi-half):min(h,vi+half+1),
+                       max(0,ui-half):min(w,ui+half+1)]
+        valid  = window[(window > 0) & np.isfinite(window)]
         if len(valid) == 0:
-            self.get_logger().warn(f'Invalid depth near ({u_int}, {v_int})')
+            self.get_logger().warn(f'Invalid depth near ({ui}, {vi})')
             return None
         Z = float(np.median(valid))
 
-        X = (u - self.cx) * Z / self.fx
-        Y = (v - self.cy) * Z / self.fy
-
         pose = Pose()
-        pose.position.x = float(X)
-        pose.position.y = float(Y)
-        pose.position.z = float(Z)
+        pose.position.x = float((u - self.cx) * Z / self.fx)
+        pose.position.y = float((v - self.cy) * Z / self.fy)
+        pose.position.z = Z
 
-        r = Rotation.from_euler('z', angle_deg, degrees=True)
-        q = r.as_quat()
-        pose.orientation.x = q[0]
-        pose.orientation.y = q[1]
-        pose.orientation.z = q[2]
-        pose.orientation.w = q[3]
+        q = Rotation.from_euler('z', angle_deg, degrees=True).as_quat()
+        pose.orientation.x, pose.orientation.y = q[0], q[1]
+        pose.orientation.z, pose.orientation.w = q[2], q[3]
         return pose
 
-    def _estimate_height_type(self, brick_z_cam: float) -> str:
-        """
-        Classify brick height from depth relative to the baseplate surface.
-        Falls back to 'normal' if the baseplate hasn't been detected yet.
-        """
-        if self.baseplate_z_cam is None:
-            return 'normal'
-        height_m = self.baseplate_z_cam - brick_z_cam
-        for label, (lo, hi) in HEIGHT_THRESHOLDS.items():
-            if lo <= height_m < hi:
-                return label
-        return 'normal'
-
     # -----------------------------------------------------------------------
-    # Publishing
+    # Baseplate detection (2D — for debug overlay + TF broadcast)
     # -----------------------------------------------------------------------
-
-    def publish_poses(self, bricks: list) -> list:
-        """
-        Transform each detected brick from camera frame → base_link.
-        Publishes /detected_bricks (PoseArray) and /detected_bricks_meta (JSON).
-        Returns a list of dicts enriched with 'pose_base' (Pose in base_link)
-        for use by publish_markers — avoids a second TF lookup.
-        """
-        camera_frame = self.get_parameter('camera_frame').get_parameter_value().string_value
-
-        pose_array = PoseArray()
-        pose_array.header = Header()
-        pose_array.header.stamp    = self.get_clock().now().to_msg()
-        pose_array.header.frame_id = 'base_link'
-
-        meta_list   = []
-        bricks_base = []   # bricks successfully transformed to base_link
-
-        for brick in bricks:
-            try:
-                transform = self.tf_buffer.lookup_transform(
-                    'base_link', camera_frame,
-                    rclpy.time.Time(),
-                    timeout=Duration(seconds=TF_TIMEOUT_SEC),
-                )
-                pose_base = tf2_geometry_msgs.do_transform_pose(brick['pose'], transform)
-                pose_array.poses.append(pose_base)
-                meta_list.append({
-                    'color':       brick['color'],
-                    'shape':       list(brick['shape']),
-                    'height_type': brick['height_type'],
-                })
-                bricks_base.append({**brick, 'pose_base': pose_base})
-
-            except tf2_ros.LookupException as e:
-                self.get_logger().warn(f'TF lookup failed: {e}')
-            except tf2_ros.ExtrapolationException as e:
-                self.get_logger().warn(f'TF extrapolation error: {e}')
-
-        self.pose_pub.publish(pose_array)
-
-        meta_msg      = String()
-        meta_msg.data = json.dumps(meta_list)
-        self.meta_pub.publish(meta_msg)
-
-        self.get_logger().info(f'Published {len(pose_array.poses)} brick poses.')
-        return bricks_base
-
-    def publish_markers(self, bricks_base: list):
-        """
-        Publish a MarkerArray to /duplo_markers for RViz visualization.
-
-        Contents:
-          ns='baseplate' id=0  — flat green box showing the physical baseplate
-                                 footprint, published in baseplate_frame so it
-                                 automatically tracks the detected plate position.
-          ns='baseplate' id=1  — stud grid lines (LINE_LIST) in baseplate_frame.
-          ns='bricks'    id=N  — one CUBE per detected brick in base_link,
-                                 sized to actual shape × height, coloured to match.
-          ns='brick_labels' id=N — TEXT_VIEW_FACING label above each brick.
-
-        A DELETEALL marker is sent first each cycle to clear stale markers from
-        bricks that have been removed or moved.
-        """
-        now     = self.get_clock().now().to_msg()
-        markers = MarkerArray()
-
-        # --- Clear all previous markers ---
-        clear              = Marker()
-        clear.action       = Marker.DELETEALL
-        clear.header.frame_id = 'base_link'
-        clear.header.stamp = now
-        markers.markers.append(clear)
-
-        # --- Baseplate flat box (published in baseplate_frame) ---
-        bp_w = BASEPLATE_COLS * STUD_PITCH_M   # 0.256 m
-        bp_d = BASEPLATE_ROWS * STUD_PITCH_M   # 0.256 m
-
-        bp_box                 = Marker()
-        bp_box.header.frame_id = 'baseplate_frame'
-        bp_box.header.stamp    = now
-        bp_box.ns              = 'baseplate'
-        bp_box.id              = 0
-        bp_box.type            = Marker.CUBE
-        bp_box.action          = Marker.ADD
-        # Centre of plate in baseplate_frame (origin = corner stud)
-        bp_box.pose.position.x = bp_w / 2.0
-        bp_box.pose.position.y = bp_d / 2.0
-        bp_box.pose.position.z = -0.005   # sit slightly below stud surface
-        bp_box.pose.orientation.w = 1.0
-        bp_box.scale.x         = bp_w
-        bp_box.scale.y         = bp_d
-        bp_box.scale.z         = 0.008   # 8 mm thin slab
-        bp_box.color.r         = 0.10
-        bp_box.color.g         = 0.45
-        bp_box.color.b         = 0.15
-        bp_box.color.a         = 0.85
-        markers.markers.append(bp_box)
-
-        # --- Stud grid lines (LINE_LIST in baseplate_frame) ---
-        grid                 = Marker()
-        grid.header.frame_id = 'baseplate_frame'
-        grid.header.stamp    = now
-        grid.ns              = 'baseplate'
-        grid.id              = 1
-        grid.type            = Marker.LINE_LIST
-        grid.action          = Marker.ADD
-        grid.pose.orientation.w = 1.0
-        grid.scale.x         = 0.0008   # line width (0.8 mm)
-        grid.color.r         = 0.05
-        grid.color.g         = 0.25
-        grid.color.b         = 0.05
-        grid.color.a         = 0.70
-
-        Z_GRID = 0.001   # 1 mm above the baseplate surface
-        # Horizontal lines — one per row boundary
-        for row in range(BASEPLATE_ROWS + 1):
-            y  = row * STUD_PITCH_M
-            p0 = Point(); p0.x = 0.0;  p0.y = y; p0.z = Z_GRID
-            p1 = Point(); p1.x = bp_w; p1.y = y; p1.z = Z_GRID
-            grid.points += [p0, p1]
-        # Vertical lines — one per column boundary
-        for col in range(BASEPLATE_COLS + 1):
-            x  = col * STUD_PITCH_M
-            p0 = Point(); p0.x = x; p0.y = 0.0;  p0.z = Z_GRID
-            p1 = Point(); p1.x = x; p1.y = bp_d; p1.z = Z_GRID
-            grid.points += [p0, p1]
-        markers.markers.append(grid)
-
-        # --- Per-brick cube + label (published in base_link) ---
-        for i, brick in enumerate(bricks_base):
-            color_name  = brick['color']
-            br, bc      = brick['shape']
-            height_type = brick['height_type']
-            pose_base   = brick['pose_base']
-            brick_h     = BRICK_HEIGHTS.get(height_type, BRICK_HEIGHTS['normal'])
-            rgba        = BRICK_COLORS_RGBA.get(color_name, (0.8, 0.8, 0.8, 1.0))
-
-            # Cube sized to the brick's physical footprint and height
-            box                 = Marker()
-            box.header.frame_id = 'base_link'
-            box.header.stamp    = now
-            box.ns              = 'bricks'
-            box.id              = i
-            box.type            = Marker.CUBE
-            box.action          = Marker.ADD
-            box.pose            = pose_base   # centroid + orientation from detector
-            # Long axis (cols) → scale.x; short axis (rows) → scale.y
-            box.scale.x         = bc * STUD_PITCH_M
-            box.scale.y         = br * STUD_PITCH_M
-            box.scale.z         = brick_h
-            box.color.r         = rgba[0]
-            box.color.g         = rgba[1]
-            box.color.b         = rgba[2]
-            box.color.a         = rgba[3]
-            markers.markers.append(box)
-
-            # Text label floating above the brick
-            txt                 = Marker()
-            txt.header.frame_id = 'base_link'
-            txt.header.stamp    = now
-            txt.ns              = 'brick_labels'
-            txt.id              = i
-            txt.type            = Marker.TEXT_VIEW_FACING
-            txt.action          = Marker.ADD
-            # Explicit position copy — avoid mutating pose_base
-            txt.pose.position.x    = pose_base.position.x
-            txt.pose.position.y    = pose_base.position.y
-            txt.pose.position.z    = pose_base.position.z + brick_h + 0.025
-            txt.pose.orientation.w = 1.0
-            txt.scale.z            = 0.020   # text height in metres
-            txt.color.r = txt.color.g = txt.color.b = txt.color.a = 1.0
-            txt.text               = f'{color_name}\n{br}x{bc} [{height_type}]'
-            markers.markers.append(txt)
-
-        self.marker_pub.publish(markers)
 
     def detect_baseplate(self, rgb: np.ndarray, depth: np.ndarray):
-        """
-        Detect the green Duplo baseplate.
-        Returns (X, Y, Z, angle_deg, box_pts) in camera frame, or None.
-        """
+        """Detect baseplate via HSV. Returns (X,Y,Z,angle,box_pts) or None."""
         hsv  = cv2.cvtColor(rgb, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv,
-                           np.array(BASEPLATE_HSV_LOWER),
-                           np.array(BASEPLATE_HSV_UPPER))
-
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-        mask   = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  kernel)
-        mask   = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        mask = cv2.inRange(hsv, np.array(BASEPLATE_HSV_LOWER),
+                               np.array(BASEPLATE_HSV_UPPER))
+        k    = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        mask = cv2.morphologyEx(cv2.morphologyEx(mask, cv2.MORPH_OPEN, k),
+                                cv2.MORPH_CLOSE, k)
 
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not contours:
-            return None
+        if not contours: return None
 
         largest = max(contours, key=cv2.contourArea)
         if cv2.contourArea(largest) < BASEPLATE_MIN_AREA_PX:
-            self.get_logger().warn('Largest green blob too small — baseplate not found', once=True)
+            self.get_logger().warn('Baseplate blob too small', once=True)
             return None
 
         rect = cv2.minAreaRect(largest)
         (cx_px, cy_px), (w_px, h_px), angle_deg = rect
-        if w_px < h_px:
-            angle_deg += 90.0
+        if w_px < h_px: angle_deg += 90.0
         box_pts = np.int0(cv2.boxPoints(rect))
 
-        cx_int, cy_int = int(cx_px), int(cy_px)
-        img_h, img_w   = depth.shape
-        half           = 5
-        y0, y1 = max(0, cy_int - half), min(img_h, cy_int + half + 1)
-        x0, x1 = max(0, cx_int - half), min(img_w, cx_int + half + 1)
-        window  = depth[y0:y1, x0:x1]
-        valid   = window[(window > 0) & ~np.isnan(window)]
-        if len(valid) == 0:
-            self.get_logger().warn(f'Invalid depth at baseplate center ({cx_int}, {cy_int})')
-            return None
+        ci, ri  = int(cx_px), int(cy_px)
+        ih, iw  = depth.shape
+        window  = depth[max(0,ri-5):min(ih,ri+6), max(0,ci-5):min(iw,ci+6)]
+        valid   = window[(window > 0) & np.isfinite(window)]
+        if len(valid) == 0: return None
         Z = float(np.median(valid))
         X = (cx_px - self.cx) * Z / self.fx
         Y = (cy_px - self.cy) * Z / self.fy
-
         return X, Y, Z, angle_deg, box_pts
 
-    def publish_baseplate_tf(self, X: float, Y: float, Z: float, angle_deg: float):
-        """
-        Transform the detected baseplate pose from camera frame → base_link,
-        then broadcast as the 'baseplate_frame' STATIC TF.
-        """
+    def publish_baseplate_tf(self, X, Y, Z, angle_deg):
+        """Broadcast baseplate_frame as a static TF relative to base_link."""
         camera_frame = self.get_parameter('camera_frame').get_parameter_value().string_value
 
         pose_cam = Pose()
-        pose_cam.position.x = X
-        pose_cam.position.y = Y
-        pose_cam.position.z = Z
-        rot = Rotation.from_euler('z', angle_deg, degrees=True)
-        q   = rot.as_quat()
-        pose_cam.orientation.x = q[0]
-        pose_cam.orientation.y = q[1]
-        pose_cam.orientation.z = q[2]
-        pose_cam.orientation.w = q[3]
+        pose_cam.position.x, pose_cam.position.y, pose_cam.position.z = X, Y, Z
+        q = Rotation.from_euler('z', angle_deg, degrees=True).as_quat()
+        pose_cam.orientation.x, pose_cam.orientation.y = q[0], q[1]
+        pose_cam.orientation.z, pose_cam.orientation.w = q[2], q[3]
 
         try:
-            transform = self.tf_buffer.lookup_transform(
+            tf = self.tf_buffer.lookup_transform(
                 'base_link', camera_frame,
-                rclpy.time.Time(),
-                timeout=Duration(seconds=TF_TIMEOUT_SEC),
-            )
-            pose_base = tf2_geometry_msgs.do_transform_pose(pose_cam, transform)
+                rclpy.time.Time(), timeout=Duration(seconds=TF_TIMEOUT_SEC))
+            pose_base = tf2_geometry_msgs.do_transform_pose(pose_cam, tf)
         except (tf2_ros.LookupException, tf2_ros.ExtrapolationException) as e:
             self.get_logger().warn(f'Baseplate TF lookup failed: {e}')
             return
@@ -682,18 +626,159 @@ class BrickDetectorNode(Node):
         t.transform.translation.y = pose_base.position.y
         t.transform.translation.z = pose_base.position.z
         t.transform.rotation      = pose_base.orientation
-
         self.static_tf_broadcaster.sendTransform(t)
 
-    def draw_detection(self, img: np.ndarray, stud_centers: list,
-                       color_name: str, brick_shape: tuple, height_type: str):
-        """Draw detected studs and brick info onto the 2D debug image."""
+    # -----------------------------------------------------------------------
+    # Publishing
+    # -----------------------------------------------------------------------
+
+    def publish_poses(self, bricks: list) -> list:
+        """
+        Transform detected bricks to base_link, publish PoseArray + meta JSON.
+        Returns list of bricks enriched with 'pose_base' for publish_markers.
+        Meta JSON now includes 'height_m' (measured float) alongside 'height_type'.
+        """
+        camera_frame = self.get_parameter('camera_frame').get_parameter_value().string_value
+
+        pose_array             = PoseArray()
+        pose_array.header      = Header()
+        pose_array.header.stamp    = self.get_clock().now().to_msg()
+        pose_array.header.frame_id = 'base_link'
+
+        meta_list   = []
+        bricks_base = []
+
+        for brick in bricks:
+            try:
+                tf        = self.tf_buffer.lookup_transform(
+                    'base_link', camera_frame,
+                    rclpy.time.Time(), timeout=Duration(seconds=TF_TIMEOUT_SEC))
+                pose_base = tf2_geometry_msgs.do_transform_pose(brick['pose'], tf)
+
+                pose_array.poses.append(pose_base)
+                meta_list.append({
+                    'color':       brick['color'],
+                    'shape':       list(brick['shape']),
+                    'height_type': brick['height_type'],
+                    'height_m':    round(brick['height_m'] * 1000, 1),  # mm, 1 dp
+                })
+                bricks_base.append({**brick, 'pose_base': pose_base})
+
+            except (tf2_ros.LookupException, tf2_ros.ExtrapolationException) as e:
+                self.get_logger().warn(f'TF lookup failed: {e}')
+
+        self.pose_pub.publish(pose_array)
+        meta_msg      = String()
+        meta_msg.data = json.dumps(meta_list)
+        self.meta_pub.publish(meta_msg)
+        plane_status = 'fitted' if self.ground_plane else 'fallback depth'
+        self.get_logger().info(
+            f'Published {len(pose_array.poses)} bricks. Ground plane: {plane_status}'
+        )
+        return bricks_base
+
+    def publish_markers(self, bricks_base: list):
+        """Publish RViz MarkerArray: baseplate box, stud grid, brick boxes, labels."""
+        now     = self.get_clock().now().to_msg()
+        markers = MarkerArray()
+
+        clear              = Marker()
+        clear.action       = Marker.DELETEALL
+        clear.header.frame_id = 'base_link'
+        clear.header.stamp = now
+        markers.markers.append(clear)
+
+        bp_w = BASEPLATE_COLS * STUD_PITCH_M
+        bp_d = BASEPLATE_ROWS * STUD_PITCH_M
+
+        # Baseplate flat box
+        bp              = Marker()
+        bp.header.frame_id = 'baseplate_frame'
+        bp.header.stamp = now
+        bp.ns, bp.id    = 'baseplate', 0
+        bp.type         = Marker.CUBE
+        bp.action       = Marker.ADD
+        bp.pose.position.x = bp_w / 2.0
+        bp.pose.position.y = bp_d / 2.0
+        bp.pose.position.z = -0.005
+        bp.pose.orientation.w = 1.0
+        bp.scale.x, bp.scale.y, bp.scale.z = bp_w, bp_d, 0.008
+        bp.color.r, bp.color.g, bp.color.b, bp.color.a = 0.10, 0.45, 0.15, 0.85
+        markers.markers.append(bp)
+
+        # Stud grid lines
+        grid                 = Marker()
+        grid.header.frame_id = 'baseplate_frame'
+        grid.header.stamp    = now
+        grid.ns, grid.id     = 'baseplate', 1
+        grid.type            = Marker.LINE_LIST
+        grid.action          = Marker.ADD
+        grid.pose.orientation.w = 1.0
+        grid.scale.x         = 0.0008
+        grid.color.r, grid.color.g, grid.color.b, grid.color.a = 0.05, 0.25, 0.05, 0.70
+        Z_GRID = 0.001
+        for row in range(BASEPLATE_ROWS + 1):
+            y = row * STUD_PITCH_M
+            p0 = Point(); p0.x = 0.0;  p0.y = y; p0.z = Z_GRID
+            p1 = Point(); p1.x = bp_w; p1.y = y; p1.z = Z_GRID
+            grid.points += [p0, p1]
+        for col in range(BASEPLATE_COLS + 1):
+            x = col * STUD_PITCH_M
+            p0 = Point(); p0.x = x; p0.y = 0.0;  p0.z = Z_GRID
+            p1 = Point(); p1.x = x; p1.y = bp_d; p1.z = Z_GRID
+            grid.points += [p0, p1]
+        markers.markers.append(grid)
+
+        for i, brick in enumerate(bricks_base):
+            br, bc      = brick['shape']
+            height_type = brick['height_type']
+            height_m    = brick['height_m']
+            pose_base   = brick['pose_base']
+            brick_h     = BRICK_HEIGHTS.get(height_type, BRICK_HEIGHTS['normal'])
+            rgba        = BRICK_COLORS_RGBA.get(brick['color'], (0.8, 0.8, 0.8, 1.0))
+
+            box                 = Marker()
+            box.header.frame_id = 'base_link'
+            box.header.stamp    = now
+            box.ns, box.id      = 'bricks', i
+            box.type            = Marker.CUBE
+            box.action          = Marker.ADD
+            box.pose            = pose_base
+            box.scale.x         = bc * STUD_PITCH_M
+            box.scale.y         = br * STUD_PITCH_M
+            box.scale.z         = brick_h
+            box.color.r, box.color.g = rgba[0], rgba[1]
+            box.color.b, box.color.a = rgba[2], rgba[3]
+            markers.markers.append(box)
+
+            txt                 = Marker()
+            txt.header.frame_id = 'base_link'
+            txt.header.stamp    = now
+            txt.ns, txt.id      = 'brick_labels', i
+            txt.type            = Marker.TEXT_VIEW_FACING
+            txt.action          = Marker.ADD
+            txt.pose.position.x    = pose_base.position.x
+            txt.pose.position.y    = pose_base.position.y
+            txt.pose.position.z    = pose_base.position.z + brick_h + 0.025
+            txt.pose.orientation.w = 1.0
+            txt.scale.z            = 0.020
+            txt.color.r = txt.color.g = txt.color.b = txt.color.a = 1.0
+            txt.text = f'{brick["color"]}\n{br}x{bc} [{height_type}] {height_m*1000:.0f}mm'
+            markers.markers.append(txt)
+
+        self.marker_pub.publish(markers)
+
+    def draw_detection(self, img, stud_centers, color_name, brick_shape,
+                       height_type, height_m):
+        """Annotate the 2D debug image with stud circles and brick info."""
         for (x, y) in stud_centers:
             cv2.circle(img, (x, y), STUD_MAX_RADIUS_PX, (0, 255, 0), 2)
         if stud_centers:
-            cx    = int(np.mean([c[0] for c in stud_centers]))
-            cy    = int(np.mean([c[1] for c in stud_centers]))
-            label = f'{color_name} {brick_shape[0]}x{brick_shape[1]} [{height_type}]'
+            cx  = int(np.mean([c[0] for c in stud_centers]))
+            cy  = int(np.mean([c[1] for c in stud_centers]))
+            br, bc = brick_shape
+            label = (f'{color_name} {br}x{bc} [{height_type}] '
+                     f'{height_m*1000:.0f}mm')
             cv2.putText(img, label, (cx - 20, cy - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
