@@ -16,7 +16,10 @@ ROS2 Topics:
     /camera/camera/color/camera_info      (sensor_msgs/CameraInfo)
   Published:
     /detected_bricks                      (geometry_msgs/PoseArray)
-    /brick_debug_image                    (sensor_msgs/Image)  [visualization]
+    /detected_bricks_meta                 (std_msgs/String)     [JSON color+shape metadata]
+    /brick_debug_image                    (sensor_msgs/Image)   [visualization]
+  TF Broadcast:
+    base_link -> baseplate_frame          [updated every cycle]
 """
 
 import json
@@ -29,7 +32,7 @@ import numpy as np
 from cv_bridge import CvBridge
 
 from sensor_msgs.msg import Image, CameraInfo
-from geometry_msgs.msg import PoseArray, Pose
+from geometry_msgs.msg import PoseArray, Pose, TransformStamped
 from std_msgs.msg import Header, String
 
 import tf2_ros
@@ -51,6 +54,14 @@ COLOR_RANGES = {
     "green":  [((40,  70,  70),  (80,  255, 255))],
     # more colors to be added
 }
+
+# ---------------------------------------------------------------------------
+# Baseplate HSV range — tuned to the green Duplo baseplate
+# More muted/darker than brick green (lower saturation + value ceiling)
+# ---------------------------------------------------------------------------
+BASEPLATE_HSV_LOWER  = ( 50,  40,  40)
+BASEPLATE_HSV_UPPER  = ( 85, 180, 160)
+BASEPLATE_MIN_AREA_PX = 5000   # ignore blobs smaller than this (rules out green bricks)
 
 # ---------------------------------------------------------------------------
 # Stud geometry constants — tune empirically once camera height is fixed
@@ -88,8 +99,10 @@ class BrickDetectorNode(Node):
         self.meta_pub  = self.create_publisher(String,    '/detected_bricks_meta',  10)
 
         # TF
-        self.tf_buffer   = tf2_ros.Buffer()
-        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+        self.tf_buffer      = tf2_ros.Buffer()
+        self.tf_listener    = tf2_ros.TransformListener(self.tf_buffer, self)
+        self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
+        # Override via ROS param if the frame name differs on your hardware
         self.declare_parameter('camera_frame', 'camera_color_optical_frame')
 
         self.create_timer(0.2, self.process)
@@ -129,6 +142,16 @@ class BrickDetectorNode(Node):
         rgb   = self.latest_rgb.copy()
         depth = self.latest_depth.copy()
         debug = rgb.copy()
+
+        # Detect baseplate and broadcast its TF frame every cycle
+        bp = self.detect_baseplate(rgb, depth)
+        if bp is not None:
+            X, Y, Z, angle_deg, box_pts = bp
+            self.publish_baseplate_tf(X, Y, Z, angle_deg)
+            # Draw the detected baseplate rectangle on the debug image
+            cv2.drawContours(debug, [box_pts], 0, (0, 200, 0), 2)
+            cv2.putText(debug, 'baseplate', tuple(box_pts[0]),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 0), 2)
 
         all_bricks = []  # list of dicts: {color, shape, pose}
 
@@ -408,6 +431,111 @@ class BrickDetectorNode(Node):
         self.meta_pub.publish(meta_msg)
 
         self.get_logger().info(f'Published {len(pose_array.poses)} brick poses.')
+
+    def detect_baseplate(self, rgb: np.ndarray, depth: np.ndarray):
+        """
+        Detect the green Duplo baseplate in the scene.
+
+        Segments the baseplate HSV range, finds the largest qualifying contour,
+        fits a rotated rectangle to get its center and orientation, then
+        back-projects to 3D using depth + intrinsics.
+
+        Returns (X, Y, Z, angle_deg, box_pts) in camera frame, or None if not found.
+            X, Y, Z:    3D position of baseplate center (meters, camera frame)
+            angle_deg:  yaw of the baseplate's long axis (degrees)
+            box_pts:    4 corner pixels of the fitted rectangle (for debug drawing)
+        """
+        hsv  = cv2.cvtColor(rgb, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, np.array(BASEPLATE_HSV_LOWER), np.array(BASEPLATE_HSV_UPPER))
+
+        # Larger kernel than brick segmentation — baseplate is one big region
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None
+
+        # The baseplate is the largest green region in the scene
+        largest = max(contours, key=cv2.contourArea)
+        if cv2.contourArea(largest) < BASEPLATE_MIN_AREA_PX:
+            self.get_logger().warn('Largest green blob too small — baseplate not found', once=True)
+            return None
+
+        # Fit a rotated rectangle to get center position and orientation
+        rect = cv2.minAreaRect(largest)
+        (cx_px, cy_px), (w_px, h_px), angle_deg = rect
+
+        # minAreaRect returns angle in [-90, 0); flip when height > width so
+        # angle_deg always describes the long axis of the baseplate
+        if w_px < h_px:
+            angle_deg += 90.0
+
+        box_pts = np.int0(cv2.boxPoints(rect))
+
+        # Sample depth over a window at the detected center
+        cx_int, cy_int = int(cx_px), int(cy_px)
+        img_h, img_w = depth.shape
+        half = 5
+        y0, y1 = max(0, cy_int - half), min(img_h, cy_int + half + 1)
+        x0, x1 = max(0, cx_int - half), min(img_w, cx_int + half + 1)
+        window = depth[y0:y1, x0:x1]
+        valid  = window[(window > 0) & ~np.isnan(window)]
+        if len(valid) == 0:
+            self.get_logger().warn(f'Invalid depth at baseplate center ({cx_int}, {cy_int})')
+            return None
+        Z = float(np.median(valid))
+
+        # Back-project center to 3D camera frame
+        X = (cx_px - self.cx) * Z / self.fx
+        Y = (cy_px - self.cy) * Z / self.fy
+
+        return X, Y, Z, angle_deg, box_pts
+
+    def publish_baseplate_tf(self, X: float, Y: float, Z: float, angle_deg: float):
+        """
+        Transform the baseplate pose from camera frame to base_link, then
+        broadcast it as the 'baseplate_frame' TF transform.
+
+        The planner looks up this frame each cycle to compute slot positions,
+        so if the baseplate shifts the next placement automatically corrects.
+        """
+        camera_frame = self.get_parameter('camera_frame').get_parameter_value().string_value
+
+        # Build pose in camera frame
+        pose_cam = Pose()
+        pose_cam.position.x = X
+        pose_cam.position.y = Y
+        pose_cam.position.z = Z
+        rot = Rotation.from_euler('z', angle_deg, degrees=True)
+        q   = rot.as_quat()  # [x, y, z, w]
+        pose_cam.orientation.x = q[0]
+        pose_cam.orientation.y = q[1]
+        pose_cam.orientation.z = q[2]
+        pose_cam.orientation.w = q[3]
+
+        # Transform to base_link
+        try:
+            transform  = self.tf_buffer.lookup_transform(
+                'base_link', camera_frame, rclpy.time.Time()
+            )
+            pose_base = tf2_geometry_msgs.do_transform_pose(pose_cam, transform)
+        except (tf2_ros.LookupException, tf2_ros.ExtrapolationException) as e:
+            self.get_logger().warn(f'Baseplate TF lookup failed: {e}')
+            return
+
+        # Broadcast base_link -> baseplate_frame
+        t = TransformStamped()
+        t.header.stamp    = self.get_clock().now().to_msg()
+        t.header.frame_id = 'base_link'
+        t.child_frame_id  = 'baseplate_frame'
+        t.transform.translation.x = pose_base.position.x
+        t.transform.translation.y = pose_base.position.y
+        t.transform.translation.z = pose_base.position.z
+        t.transform.rotation      = pose_base.orientation
+
+        self.tf_broadcaster.sendTransform(t)
 
     def draw_detection(self, img: np.ndarray, stud_centers: list,
                        color_name: str, brick_shape: tuple):
