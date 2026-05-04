@@ -1,9 +1,11 @@
 /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/perception/lib/python3.10/site-packages/perception/__init__.py
 /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/perception/lib/python3.10/site-packages/perception/static_tf_transform.py
 /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/perception/lib/python3.10/site-packages/perception/brick_detector.py
+/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/perception/lib/python3.10/site-packages/perception/hsv_tuner.py
 /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/perception/lib/python3.10/site-packages/perception/__pycache__/__init__.cpython-310.pyc
 /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/perception/lib/python3.10/site-packages/perception/__pycache__/static_tf_transform.cpython-310.pyc
 /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/perception/lib/python3.10/site-packages/perception/__pycache__/brick_detector.cpython-310.pyc
+/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/perception/lib/python3.10/site-packages/perception/__pycache__/hsv_tuner.cpython-310.pyc
 /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/perception/share/ament_index/resource_index/packages/perception
 /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/perception/share/perception/package.xml
 /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/perception/lib/python3.10/site-packages/perception-0.0.0-py3.10.egg-info/PKG-INFO
@@ -15,3 +17,4 @@
 /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/perception/lib/python3.10/site-packages/perception-0.0.0-py3.10.egg-info/SOURCES.txt
 /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/perception/lib/perception/brick_detector
 /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/perception/lib/perception/camera_transform
+/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/perception/lib/perception/hsv_tuner
