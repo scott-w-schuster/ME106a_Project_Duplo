@@ -1,0 +1,4 @@
+[console_scripts]
+brick_detector = brick_detector:main
+camera_transform = static_tf_transform:main
+
