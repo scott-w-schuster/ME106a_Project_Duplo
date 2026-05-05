@@ -1,0 +1,722 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>LEGO Builder – Robot Arm Planner</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { display: flex; height: 100vh; overflow: hidden; font-family: 'Segoe UI', sans-serif; background: #0d1117; color: #e6edf3; }
+
+#sidebar {
+  width: 210px; min-width: 210px;
+  background: #161b22;
+  border-right: 1px solid #30363d;
+  display: flex; flex-direction: column;
+  padding: 14px 12px; gap: 10px;
+  overflow-y: auto;
+}
+
+#sidebar h1 { font-size: 13px; color: #58a6ff; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 2px; }
+
+.section-label { font-size: 10px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px; }
+
+.block-card {
+  background: #21262d; border: 2px solid #30363d; border-radius: 8px;
+  padding: 8px 10px; cursor: grab; user-select: none;
+  transition: border-color 0.12s, background 0.12s;
+  display: flex; align-items: center; gap: 8px;
+}
+.block-card:hover:not(.empty) { border-color: #58a6ff; background: #1c2128; }
+.block-card.empty { opacity: 0.38; cursor: not-allowed; }
+.block-card.active-drag { border-color: #7ee787; background: #1a2a1a; cursor: grabbing; }
+
+.block-swatch { border-radius: 3px; flex-shrink: 0; height: 18px; }
+.block-info { flex: 1; }
+.block-name { font-size: 11px; font-weight: 600; }
+.block-count { font-size: 10px; color: #8b949e; margin-top: 1px; }
+
+.controls-box {
+  background: #21262d; border-radius: 8px; padding: 9px 10px;
+  font-size: 10px; line-height: 1.9; color: #8b949e;
+}
+.controls-box b { color: #c9d1d9; }
+
+.spacer { flex: 1; }
+
+.btn {
+  padding: 7px 10px; border-radius: 6px; border: none;
+  cursor: pointer; font-size: 11px; font-weight: 600;
+  transition: opacity 0.15s; width: 100%;
+}
+.btn:hover { opacity: 0.82; }
+.btn-green { background: #238636; color: #fff; }
+.btn-red { background: #b91c1c; color: #fff; }
+
+#canvas-container { flex: 1; position: relative; overflow: hidden; }
+#canvas { width: 100%; height: 100%; display: block; }
+
+#status {
+  position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%);
+  background: rgba(22,27,34,0.92); border: 1px solid #30363d;
+  border-radius: 20px; padding: 5px 14px; font-size: 11px;
+  pointer-events: none; white-space: nowrap; backdrop-filter: blur(4px);
+  transition: opacity 0.2s;
+}
+
+#rot-badge {
+  position: absolute; top: 12px; left: 12px;
+  background: rgba(22,27,34,0.92); border: 1px solid #30363d;
+  border-radius: 8px; padding: 5px 10px; font-size: 11px;
+  display: none; pointer-events: none;
+}
+
+#sel-badge {
+  position: absolute; top: 12px; right: 12px;
+  background: rgba(88,166,255,0.15); border: 1px solid #58a6ff;
+  border-radius: 8px; padding: 5px 10px; font-size: 11px;
+  display: none; pointer-events: none; color: #58a6ff;
+}
+</style>
+</head>
+<body>
+
+<div id="sidebar">
+  <h1>LEGO Builder</h1>
+  <div class="section-label">Block Palette</div>
+
+  <div class="block-card" data-key="blue-2x4" data-type="2x4" data-color="blue">
+    <div class="block-swatch" style="width:38px;background:#2B7FE5;"></div>
+    <div class="block-info">
+      <div class="block-name">Blue 2×4</div>
+      <div class="block-count" id="cnt-blue-2x4">5 left</div>
+    </div>
+  </div>
+
+  <div class="block-card" data-key="blue-2x2" data-type="2x2" data-color="blue">
+    <div class="block-swatch" style="width:20px;background:#2B7FE5;"></div>
+    <div class="block-info">
+      <div class="block-name">Blue 2×2</div>
+      <div class="block-count" id="cnt-blue-2x2">5 left</div>
+    </div>
+  </div>
+
+  <div class="block-card" data-key="yellow-2x4" data-type="2x4" data-color="yellow">
+    <div class="block-swatch" style="width:38px;background:#F5C518;"></div>
+    <div class="block-info">
+      <div class="block-name">Yellow 2×4</div>
+      <div class="block-count" id="cnt-yellow-2x4">5 left</div>
+    </div>
+  </div>
+
+  <div class="block-card" data-key="yellow-2x2" data-type="2x2" data-color="yellow">
+    <div class="block-swatch" style="width:20px;background:#F5C518;"></div>
+    <div class="block-info">
+      <div class="block-name">Yellow 2×2</div>
+      <div class="block-count" id="cnt-yellow-2x2">5 left</div>
+    </div>
+  </div>
+
+  <div class="section-label">Controls</div>
+  <div class="controls-box">
+    <b>Drag</b> block onto plate<br>
+    <b>R</b> rotate while dragging<br>
+    <b>Click</b> placed block → select<br>
+    <b>R</b> rotate selected block<br>
+    <b>Delete</b> remove selected<br>
+    <b>Esc</b> cancel / deselect<br>
+    <b>Right-drag</b> orbit camera<br>
+    <b>Scroll</b> zoom
+  </div>
+
+  <div class="spacer"></div>
+  <button class="btn btn-green" id="btn-export">Export Build Plan</button>
+  <button class="btn btn-red" id="btn-reset">Reset Build</button>
+</div>
+
+<div id="canvas-container">
+  <canvas id="canvas"></canvas>
+  <div id="status">Drag a block onto the build plate to start</div>
+  <div id="rot-badge">Rotation: 0°</div>
+  <div id="sel-badge">Block selected</div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.155.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.155.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ── CONSTANTS ────────────────────────────────────────────────────────────────
+const GRID = 20;
+const BH   = 1.2;   // block height world units
+const SR   = 0.18;  // stud radius
+const SH   = 0.2;   // stud height
+
+const BLOCK_DIMS = { '2x4': { w: 2, d: 4 }, '2x2': { w: 2, d: 2 } };
+const COLOR_HEX  = { blue: 0x2B7FE5, yellow: 0xF5C518 };
+const COLOR_DARK = { blue: 0x1a5aaa, yellow: 0xc09a10 };
+
+// ── HELPERS ──────────────────────────────────────────────────────────────────
+const gW = g => g - GRID / 2 + 0.5;          // grid index → world center
+const wG = w => Math.round(w + GRID / 2 - 0.5); // world → nearest grid index
+
+function dims(type, rot) {
+  const b = BLOCK_DIMS[type];
+  return (rot % 2 === 1) ? { w: b.d, d: b.w } : { w: b.w, d: b.d };
+}
+
+function cells(gx, gz, type, rot) {
+  const { w, d } = dims(type, rot);
+  const out = [];
+  for (let x = 0; x < w; x++) for (let z = 0; z < d; z++) out.push([gx + x, gz + z]);
+  return out;
+}
+
+// ── STATE ────────────────────────────────────────────────────────────────────
+const inventory = { 'blue-2x4': 5, 'blue-2x2': 5, 'yellow-2x4': 5, 'yellow-2x2': 5 };
+const placed    = [];                    // block records
+const occ       = {};                    // `x,z,layer` → id
+let   uid       = 0;
+const newId     = () => `b${uid++}`;
+
+let dragging    = false;   // palette drag in progress
+let dragType    = null;
+let dragColor   = null;
+let dragRot     = 0;       // 0-3 (×90°)
+let ghostGroup  = null;
+let ghostValid  = false;
+let ghostGx     = 0, ghostGz = 0, ghostLy = 0;
+let lastMx      = 0, lastMy = 0;
+let activeCard  = null;
+
+let selectedId  = null;
+
+// ── THREE.JS ─────────────────────────────────────────────────────────────────
+const scene    = new THREE.Scene();
+scene.background = new THREE.Color(0x16213e);
+scene.fog        = new THREE.FogExp2(0x16213e, 0.018);
+
+const canvas   = document.getElementById('canvas');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type    = THREE.PCFSoftShadowMap;
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 500);
+camera.position.set(14, 18, 18);
+camera.lookAt(0, 0, 0);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping  = true;
+controls.dampingFactor  = 0.06;
+controls.maxPolarAngle  = Math.PI / 2.05;
+controls.minDistance    = 4;
+controls.maxDistance    = 60;
+controls.mouseButtons   = { LEFT: null, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE };
+
+// Lights
+scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+const sun = new THREE.DirectionalLight(0xffffff, 0.9);
+sun.position.set(14, 22, 14);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -22, right: 22, top: 22, bottom: -22, near: 0.1, far: 100 });
+scene.add(sun);
+const fill = new THREE.DirectionalLight(0x6688cc, 0.3);
+fill.position.set(-10, 10, -10);
+scene.add(fill);
+
+// ── BUILD PLATE ───────────────────────────────────────────────────────────────
+(function buildPlate() {
+  const plateMat = new THREE.MeshLambertMaterial({ color: 0x2e7d32 });
+  const plate    = new THREE.Mesh(new THREE.BoxGeometry(GRID, 0.5, GRID), plateMat);
+  plate.position.y = -0.25;
+  plate.receiveShadow = true;
+  scene.add(plate);
+
+  const grid = new THREE.GridHelper(GRID, GRID, 0x1b5e20, 0x1b5e20);
+  grid.position.y = 0.001;
+  scene.add(grid);
+
+  const studGeo = new THREE.CylinderGeometry(SR, SR, SH, 8);
+  const studMat = new THREE.MeshLambertMaterial({ color: 0x33873a });
+  for (let x = 0; x < GRID; x++) for (let z = 0; z < GRID; z++) {
+    const s = new THREE.Mesh(studGeo, studMat);
+    s.position.set(gW(x), SH / 2, gW(z));
+    scene.add(s);
+  }
+})();
+
+// Invisible ground plane for raycasting
+const groundPlane = new THREE.Mesh(
+  new THREE.PlaneGeometry(200, 200),
+  new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide })
+);
+groundPlane.rotation.x = -Math.PI / 2;
+groundPlane.userData.isGround = true;
+scene.add(groundPlane);
+
+// ── BRICK MESH FACTORY ───────────────────────────────────────────────────────
+function makeBrick(type, color, rot, { ghost = false, invalid = false } = {}) {
+  const { w, d } = dims(type, rot);
+  const bodyH    = BH - SH;
+  const group    = new THREE.Group();
+
+  const baseColor = invalid ? 0xff2222 : COLOR_HEX[color];
+  const darkColor = invalid ? 0xaa1111 : COLOR_DARK[color];
+  const opacity   = ghost ? 0.52 : 1.0;
+  const trans     = ghost || invalid;
+
+  const bodyMat = new THREE.MeshLambertMaterial({ color: baseColor, transparent: trans, opacity });
+  const body    = new THREE.Mesh(new THREE.BoxGeometry(w, bodyH, d), bodyMat);
+  body.position.y  = bodyH / 2;
+  body.castShadow  = !ghost;
+  body.receiveShadow = true;
+  group.add(body);
+  group.userData.bodyMesh = body;
+
+  if (!ghost) {
+    const edgeMat = new THREE.MeshLambertMaterial({ color: darkColor });
+    const edge    = new THREE.Mesh(new THREE.BoxGeometry(w - 0.06, 0.1, d - 0.06), edgeMat);
+    edge.position.y = 0.05;
+    group.add(edge);
+  }
+
+  const studMat = new THREE.MeshLambertMaterial({ color: darkColor, transparent: trans, opacity });
+  const studGeo = new THREE.CylinderGeometry(SR, SR, SH, 8);
+  for (let sx = 0; sx < w; sx++) for (let sz = 0; sz < d; sz++) {
+    const s = new THREE.Mesh(studGeo, studMat);
+    s.position.set(sx - w / 2 + 0.5, bodyH + SH / 2, sz - d / 2 + 0.5);
+    s.castShadow = !ghost;
+    group.add(s);
+  }
+
+  return group;
+}
+
+// ── RAYCAST ──────────────────────────────────────────────────────────────────
+const raycaster = new THREE.Raycaster();
+const mouse2    = new THREE.Vector2();
+
+function setMouse(cx, cy) {
+  const r = renderer.domElement.getBoundingClientRect();
+  mouse2.x = ((cx - r.left) / r.width)  *  2 - 1;
+  mouse2.y = ((cy - r.top)  / r.height) * -2 + 1;
+}
+
+function highestLayerAt(gx, gz) {
+  let h = -1;
+  for (let ly = 0; ly < 50; ly++) {
+    if (occ[`${gx},${gz},${ly}`] !== undefined) h = ly; else if (ly > h + 1) break;
+  }
+  return h;
+}
+
+function placementAt(cx, cy) {
+  if (!dragType) return null;
+  setMouse(cx, cy);
+  raycaster.setFromCamera(mouse2, camera);
+
+  // Try hitting placed block body meshes first
+  const bodyMeshes = placed.map(b => b.bodyMesh);
+  let hits = raycaster.intersectObjects(bodyMeshes);
+  let worldX, worldZ;
+
+  if (hits.length > 0) {
+    worldX = hits[0].point.x;
+    worldZ = hits[0].point.z;
+  } else {
+    hits = raycaster.intersectObject(groundPlane);
+    if (!hits.length) return null;
+    worldX = hits[0].point.x;
+    worldZ = hits[0].point.z;
+  }
+
+  const { w, d } = dims(dragType, dragRot);
+  const curGx = wG(worldX);
+  const curGz = wG(worldZ);
+  const ancX  = curGx - Math.floor(w / 2);
+  const ancZ  = curGz - Math.floor(d / 2);
+
+  // Find layer from footprint
+  const cs = cells(ancX, ancZ, dragType, dragRot);
+  let maxLy = -1;
+  for (const [x, z] of cs) {
+    if (x >= 0 && x < GRID && z >= 0 && z < GRID)
+      maxLy = Math.max(maxLy, highestLayerAt(x, z));
+  }
+
+  return { gx: ancX, gz: ancZ, ly: maxLy + 1 };
+}
+
+// ── VALIDATION ────────────────────────────────────────────────────────────────
+function isValid(gx, gz, type, rot, ly, excludeId = null) {
+  const cs = cells(gx, gz, type, rot);
+  for (const [x, z] of cs) {
+    if (x < 0 || x >= GRID || z < 0 || z >= GRID) return false;
+    const key = `${x},${z},${ly}`;
+    if (occ[key] !== undefined && occ[key] !== excludeId) return false;
+  }
+  if (ly > 0) {
+    for (const [x, z] of cs) {
+      if (!occ[`${x},${z},${ly - 1}`]) return false;
+    }
+  }
+  return true;
+}
+
+// ── GHOST ─────────────────────────────────────────────────────────────────────
+function removeGhost() {
+  if (ghostGroup) { scene.remove(ghostGroup); ghostGroup = null; }
+}
+
+function createGhost() {
+  removeGhost();
+  ghostGroup = makeBrick(dragType, dragColor, dragRot, { ghost: true });
+  scene.add(ghostGroup);
+}
+
+function updateGhostColor(valid) {
+  const target = valid ? COLOR_HEX[dragColor] : 0xff2222;
+  ghostGroup.traverse(c => {
+    if (c.isMesh) c.material.color.setHex(target);
+  });
+}
+
+function moveGhost(cx, cy) {
+  const p = placementAt(cx, cy);
+  if (!p) { if (ghostGroup) ghostGroup.visible = false; return; }
+
+  ghostGx = p.gx; ghostGz = p.gz; ghostLy = p.ly;
+  ghostValid = isValid(p.gx, p.gz, dragType, dragRot, p.ly);
+
+  const { w, d } = dims(dragType, dragRot);
+  if (!ghostGroup) createGhost();
+  ghostGroup.visible = true;
+  ghostGroup.position.set(gW(p.gx) + (w - 1) / 2, p.ly * BH, gW(p.gz) + (d - 1) / 2);
+  updateGhostColor(ghostValid);
+}
+
+// ── PLACE BLOCK ──────────────────────────────────────────────────────────────
+function placeBlock() {
+  if (!ghostValid) { setStatus('Invalid position — block would overhang or overlap'); return; }
+  const key = `${dragColor}-${dragType}`;
+  if (inventory[key] <= 0) { setStatus('No blocks of this type left'); return; }
+
+  const { w, d } = dims(dragType, dragRot);
+  const id   = newId();
+  const cs   = cells(ghostGx, ghostGz, dragType, dragRot);
+  const mesh = makeBrick(dragType, dragColor, dragRot);
+  mesh.position.set(gW(ghostGx) + (w - 1) / 2, ghostLy * BH, gW(ghostGz) + (d - 1) / 2);
+  mesh.userData.bodyMesh.userData.blockId = id;
+  scene.add(mesh);
+
+  cs.forEach(([x, z]) => { occ[`${x},${z},${ghostLy}`] = id; });
+
+  placed.push({ id, type: dragType, color: dragColor, gx: ghostGx, gz: ghostGz, ly: ghostLy, rot: dragRot, mesh, bodyMesh: mesh.userData.bodyMesh, cells: cs });
+  inventory[key]--;
+  refreshInventory();
+  setStatus(`Placed ${dragColor} ${dragType} at layer ${ghostLy}`);
+}
+
+// ── DELETE BLOCK ──────────────────────────────────────────────────────────────
+function deleteBlock(id) {
+  const idx = placed.findIndex(b => b.id === id);
+  if (idx === -1) return;
+  const b = placed[idx];
+
+  // Check nothing rests on it
+  for (const [x, z] of b.cells) {
+    if (occ[`${x},${z},${b.ly + 1}`]) { setStatus('Cannot delete — blocks rest on top of this one'); return; }
+  }
+
+  scene.remove(b.mesh);
+  b.cells.forEach(([x, z]) => delete occ[`${x},${z},${b.ly}`]);
+  inventory[`${b.color}-${b.type}`]++;
+  placed.splice(idx, 1);
+  if (selectedId === id) clearSelection();
+  refreshInventory();
+  setStatus('Block removed');
+}
+
+// ── SELECT / HIGHLIGHT ────────────────────────────────────────────────────────
+function clearSelection() {
+  if (selectedId) {
+    const b = placed.find(p => p.id === selectedId);
+    if (b) b.mesh.traverse(c => { if (c.isMesh && c.material.emissive) c.material.emissive.setHex(0); });
+  }
+  selectedId = null;
+  document.getElementById('sel-badge').style.display = 'none';
+  setStatus('Drag a block onto the build plate to start');
+}
+
+function selectBlock(id) {
+  clearSelection();
+  selectedId = id;
+  const b = placed.find(p => p.id === id);
+  if (!b) return;
+  b.mesh.traverse(c => { if (c.isMesh && c.material.emissive) c.material.emissive.setHex(0x334455); });
+  const badge = document.getElementById('sel-badge');
+  badge.textContent = `${b.color} ${b.type} — layer ${b.ly}`;
+  badge.style.display = 'block';
+  setStatus('Delete to remove · R to rotate · Esc to deselect');
+}
+
+// ── ROTATE PLACED BLOCK ───────────────────────────────────────────────────────
+function rotatePlaced(id) {
+  const b = placed.find(p => p.id === id);
+  if (!b) return;
+  const newRot = (b.rot + 1) % 4;
+  const { w: ow, d: od } = dims(b.type, b.rot);
+  const cx = b.gx + (ow - 1) / 2;
+  const cz = b.gz + (od - 1) / 2;
+  const { w: nw, d: nd } = dims(b.type, newRot);
+  const ngx = Math.round(cx - (nw - 1) / 2);
+  const ngz = Math.round(cz - (nd - 1) / 2);
+
+  // Temporarily free cells
+  b.cells.forEach(([x, z]) => delete occ[`${x},${z},${b.ly}`]);
+
+  if (isValid(ngx, ngz, b.type, newRot, b.ly)) {
+    scene.remove(b.mesh);
+    b.rot = newRot; b.gx = ngx; b.gz = ngz;
+    b.cells = cells(ngx, ngz, b.type, newRot);
+    const m = makeBrick(b.type, b.color, newRot);
+    m.position.set(gW(ngx) + (nw - 1) / 2, b.ly * BH, gW(ngz) + (nd - 1) / 2);
+    m.userData.bodyMesh.userData.blockId = b.id;
+    b.mesh = m; b.bodyMesh = m.userData.bodyMesh;
+    scene.add(m);
+    b.cells.forEach(([x, z]) => { occ[`${x},${z},${b.ly}`] = b.id; });
+    selectBlock(b.id);
+    setStatus(`Rotated to ${newRot * 90}°`);
+  } else {
+    // Restore
+    b.cells.forEach(([x, z]) => { occ[`${x},${z},${b.ly}`] = b.id; });
+    setStatus('Cannot rotate — not enough space or would overhang');
+  }
+}
+
+// ── UI HELPERS ────────────────────────────────────────────────────────────────
+function setStatus(msg) { document.getElementById('status').textContent = msg; }
+
+function refreshInventory() {
+  for (const key of Object.keys(inventory)) {
+    const el = document.getElementById(`cnt-${key}`);
+    if (el) el.textContent = `${inventory[key]} left`;
+    const card = document.querySelector(`.block-card[data-key="${key}"]`);
+    if (card) card.classList.toggle('empty', inventory[key] <= 0);
+  }
+}
+
+function showRotBadge(deg) {
+  const el = document.getElementById('rot-badge');
+  el.textContent = `Rotation: ${deg}°`;
+  el.style.display = 'block';
+}
+
+function hideRotBadge() {
+  document.getElementById('rot-badge').style.display = 'none';
+}
+
+// ── DRAG FROM PALETTE ─────────────────────────────────────────────────────────
+function startDrag(card) {
+  const key = card.dataset.key;
+  if (inventory[key] <= 0) return;
+  dragging   = true;
+  dragType   = card.dataset.type;
+  dragColor  = card.dataset.color;
+  dragRot    = 0;
+  activeCard = card;
+  card.classList.add('active-drag');
+  controls.enabled = false;
+  createGhost();
+  showRotBadge(0);
+  setStatus('Move over plate to position · R to rotate · release to place · Esc to cancel');
+}
+
+function endDrag(place) {
+  if (place && ghostGroup && ghostGroup.visible) placeBlock();
+  dragging = false;
+  dragType = null;
+  dragColor = null;
+  if (activeCard) { activeCard.classList.remove('active-drag'); activeCard = null; }
+  controls.enabled = true;
+  removeGhost();
+  hideRotBadge();
+}
+
+// ── EVENTS ────────────────────────────────────────────────────────────────────
+document.querySelectorAll('.block-card').forEach(card => {
+  card.addEventListener('mousedown', e => {
+    e.preventDefault();
+    startDrag(card);
+  });
+});
+
+document.addEventListener('mousemove', e => {
+  lastMx = e.clientX; lastMy = e.clientY;
+  if (dragging && dragType) {
+    const r   = renderer.domElement.getBoundingClientRect();
+    const oc  = e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+    if (oc) moveGhost(e.clientX, e.clientY);
+    else if (ghostGroup) ghostGroup.visible = false;
+  }
+});
+
+document.addEventListener('mouseup', e => {
+  if (!dragging) return;
+  const r  = renderer.domElement.getBoundingClientRect();
+  const oc = e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+  endDrag(oc);
+});
+
+// Canvas left-click → select/deselect
+renderer.domElement.addEventListener('mousedown', e => {
+  if (e.button !== 0 || dragging) return;
+  setMouse(e.clientX, e.clientY);
+  raycaster.setFromCamera(mouse2, camera);
+  const hits = raycaster.intersectObjects(placed.map(b => b.bodyMesh));
+  if (hits.length > 0) {
+    const id = hits[0].object.userData.blockId;
+    if (id === selectedId) clearSelection();
+    else selectBlock(id);
+  } else {
+    clearSelection();
+  }
+});
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'r' || e.key === 'R') {
+    if (dragging && dragType) {
+      dragRot = (dragRot + 1) % 4;
+      createGhost();
+      moveGhost(lastMx, lastMy);
+      showRotBadge(dragRot * 90);
+    } else if (selectedId) {
+      rotatePlaced(selectedId);
+    }
+    return;
+  }
+  if ((e.key === 'Delete' || e.key === 'Backspace') && selectedId) {
+    e.preventDefault();
+    deleteBlock(selectedId);
+    return;
+  }
+  if (e.key === 'Escape') {
+    if (dragging) endDrag(false);
+    else clearSelection();
+  }
+});
+
+// ── RESIZE ────────────────────────────────────────────────────────────────────
+function resize() {
+  const c = document.getElementById('canvas-container');
+  renderer.setSize(c.clientWidth, c.clientHeight);
+  camera.aspect = c.clientWidth / c.clientHeight;
+  camera.updateProjectionMatrix();
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ── EXPORT ────────────────────────────────────────────────────────────────────
+document.getElementById('btn-export').addEventListener('click', () => {
+  if (placed.length === 0) { setStatus('Nothing to export yet'); return; }
+
+  const sorted = [...placed].sort((a, b) => a.ly - b.ly || a.gz - b.gz || a.gx - b.gx);
+
+  let maxX = 0, maxZ = 0, maxLy = 0;
+  for (const b of placed) {
+    const { w, d } = dims(b.type, b.rot);
+    maxX  = Math.max(maxX,  b.gx + w);
+    maxZ  = Math.max(maxZ,  b.gz + d);
+    maxLy = Math.max(maxLy, b.ly + 1);
+  }
+
+  const byType = k => placed.filter(b => `${b.color}-${b.type}` === k).length;
+
+  const plan = {
+    metadata: {
+      created_at: new Date().toISOString(),
+      tool: 'LEGO Builder – Robot Arm Planner',
+      coordinate_system: 'right_handed_y_up',
+      units: { xy_studs: 1.0, height: BH, description: '1 world unit = 1 LEGO stud pitch' },
+      grid_origin: 'center of build plate',
+      grid_size: GRID
+    },
+    build_stats: {
+      total_blocks: placed.length,
+      layers: maxLy,
+      dimensions_studs: { x: maxX, z: maxZ, height: maxLy },
+      remaining_inventory: { ...inventory },
+      blocks_used: {
+        'blue-2x4': byType('blue-2x4'), 'blue-2x2': byType('blue-2x2'),
+        'yellow-2x4': byType('yellow-2x4'), 'yellow-2x2': byType('yellow-2x2')
+      }
+    },
+    build_sequence: sorted.map((b, i) => {
+      const { w, d } = dims(b.type, b.rot);
+      const wx = parseFloat((gW(b.gx) + (w - 1) / 2).toFixed(4));
+      const wy = parseFloat((b.ly * BH + BH / 2).toFixed(4));
+      const wz = parseFloat((gW(b.gz) + (d - 1) / 2).toFixed(4));
+      return {
+        step: i + 1,
+        block_id: b.id,
+        type: b.type,
+        color: b.color,
+        layer: b.ly,
+        grid_x: b.gx,
+        grid_z: b.gz,
+        rotation_deg: b.rot * 90,
+        world_position: { x: wx, y: wy, z: wz },
+        world_footprint: {
+          x_min: parseFloat((gW(b.gx) - 0.5).toFixed(4)),
+          x_max: parseFloat((gW(b.gx) + w - 0.5).toFixed(4)),
+          y_bottom: parseFloat((b.ly * BH).toFixed(4)),
+          y_top: parseFloat(((b.ly + 1) * BH).toFixed(4)),
+          z_min: parseFloat((gW(b.gz) - 0.5).toFixed(4)),
+          z_max: parseFloat((gW(b.gz) + d - 0.5).toFixed(4))
+        },
+        occupied_cells: b.cells.map(([x, z]) => ({ grid_x: x, grid_z: z }))
+      };
+    })
+  };
+
+  const blob = new Blob([JSON.stringify(plan, null, 2)], { type: 'application/json' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href = url; a.download = `lego_build_${Date.now()}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+  setStatus(`Exported ${placed.length} block(s) in ${maxLy} layer(s)`);
+});
+
+// ── RESET ─────────────────────────────────────────────────────────────────────
+document.getElementById('btn-reset').addEventListener('click', () => {
+  if (!confirm('Reset the build and return all blocks to inventory?')) return;
+  [...placed].forEach(b => { scene.remove(b.mesh); });
+  placed.length = 0;
+  Object.keys(occ).forEach(k => delete occ[k]);
+  Object.assign(inventory, { 'blue-2x4': 5, 'blue-2x2': 5, 'yellow-2x4': 5, 'yellow-2x2': 5 });
+  clearSelection();
+  refreshInventory();
+  setStatus('Build reset — drag a block to start');
+});
+
+// ── RENDER LOOP ───────────────────────────────────────────────────────────────
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+refreshInventory();
+</script>
+</body>
+</html>
