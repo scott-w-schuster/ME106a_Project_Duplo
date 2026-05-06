@@ -1,172 +1,212 @@
-# ROS Libraries
-from std_srvs.srv import Trigger
-import sys
+import threading
+
 import rclpy
 from rclpy.node import Node
-from rclpy.action import ActionClient
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.qos import QoSProfile, DurabilityPolicy
+
+from std_srvs.srv import Trigger
 from control_msgs.action import FollowJointTrajectory
-from geometry_msgs.msg import PointStamped 
-from moveit_msgs.msg import RobotTrajectory
-from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+from rclpy.action import ActionClient
+from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import JointState
-from tf2_ros import Buffer, TransformListener
-from scipy.spatial.transform import Rotation as R
-import numpy as np
 
 from planning.ik import IKPlanner
 
+# Arm moves to this pose after grasping so the planning node can verify pickup
+CHECK_X = 0.3   # TODO: set for your robot workspace
+CHECK_Y = 0.0
+CHECK_Z = 0.5
+
+LATCH = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+
+
 class UR7e_CubeGrasp(Node):
+
+    PRE_GRASP_OFFSET = 0.185
+    GRASP_OFFSET     = 0.05
+    PRE_PLACE_OFFSET = 0.185
+    PLACE_OFFSET     = 0.02
+
     def __init__(self):
         super().__init__('cube_grasp')
 
-        self.cube_pub = self.create_subscription(PointStamped, '/cube_pose', self.cube_callback, 1)
-        self.joint_state_sub = self.create_subscription(JointState, '/joint_states', self.joint_state_callback, 1)
+        cb = ReentrantCallbackGroup()
 
+        # ── Pose inputs from planning node ────────────────────────────────────
+        self.pick_pose  = None
+        self.place_pose = None
+        self.create_subscription(PoseStamped, '/pick_pose',  self._on_pick_pose,  LATCH, callback_group=cb)
+        self.create_subscription(PoseStamped, '/place_pose', self._on_place_pose, LATCH, callback_group=cb)
+
+        # ── Joint state ───────────────────────────────────────────────────────
+        self.joint_state = None
+        self._js_lock = threading.Lock()
+        self.create_subscription(JointState, '/joint_states', self._on_joint_state, 1, callback_group=cb)
+
+        # ── Service servers (planning node calls these in order) ──────────────
+        self.create_service(Trigger, '/move_to_pregrasp',     self._handle_pregrasp,   callback_group=cb)
+        self.create_service(Trigger, '/grasp',                self._handle_grasp,      callback_group=cb)
+        self.create_service(Trigger, '/move_to_check',        self._handle_check,      callback_group=cb)
+        self.create_service(Trigger, '/preplace_and_place',   self._handle_place,      callback_group=cb)
+
+        # ── Hardware ──────────────────────────────────────────────────────────
         self.exec_ac = ActionClient(
             self, FollowJointTrajectory,
-            '/scaled_joint_trajectory_controller/follow_joint_trajectory'
+            '/scaled_joint_trajectory_controller/follow_joint_trajectory',
+            callback_group=cb,
         )
-
-        self.gripper_cli = self.create_client(Trigger, '/toggle_gripper')
-
-        self.cube_pose = None
-        self.current_plan = None
-        self.joint_state = None
+        self.gripper_cli = self.create_client(Trigger, '/toggle_gripper', callback_group=cb)
 
         self.ik_planner = IKPlanner()
 
-        self.job_queue = [] # Entries should be of type either (x, y, z, vel_scale, accel_scale) or String('toggle_grip')
+    # ── Subscriptions ─────────────────────────────────────────────────────────
 
-    def joint_state_callback(self, msg: JointState):
-        self.joint_state = msg
+    def _on_pick_pose(self, msg):
+        self.pick_pose = msg
 
-    def cube_callback(self, cube_pose):
-        if self.cube_pose is not None:
-            return
+    def _on_place_pose(self, msg):
+        self.place_pose = msg
 
-        if self.joint_state is None:
-            self.get_logger().info("No joint state yet, cannot proceed")
-            return
+    def _on_joint_state(self, msg):
+        with self._js_lock:
+            self.joint_state = msg
 
-        self.cube_pose = cube_pose
-        self.pregraspZOffset = 0.185
-        self.graspZOffest = 0.05
-        self.prePlaceZOffeset = 0.185
+    # ── Service handlers (block until motion complete) ────────────────────────
 
-        self.blockSearch
-        self.preGrasp(self, cube_pose)
-        self.graspBlock(self, cube_pose)
+    def _handle_pregrasp(self, _request, response):
+        if self.pick_pose is None:
+            return self._fail(response, 'No pick pose received')
+        p = self.pick_pose.pose
+        ok = self._move_to(p.position.x, p.position.y, p.position.z + self.PRE_GRASP_OFFSET,
+                           p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w,
+                           vel=0.1, accel=0.1)
+        return self._result(response, ok, 'pregrasp')
 
-        self.execute_jobs()
+    def _handle_grasp(self, _request, response):
+        if self.pick_pose is None:
+            return self._fail(response, 'No pick pose received')
+        p = self.pick_pose.pose
+        ox, oy, oz, ow = p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w
 
-    def blockSearch(self):
-        return
+        ok = (self._move_to(p.position.x, p.position.y, p.position.z + self.GRASP_OFFSET,
+                            ox, oy, oz, ow, vel=0.07, accel=0.05)
+              and self._toggle_gripper()
+              and self._move_to(p.position.x, p.position.y, p.position.z + self.PRE_GRASP_OFFSET,
+                                ox, oy, oz, ow, vel=0.1, accel=0.1))
+        return self._result(response, ok, 'grasp')
 
-    def preGrasp(self, cube_pose):
-        self.job_queue.append(cube_pose.point.x, cube_pose.point.y, cube_pose.point.z + self.pregraspZOffset, 0.1, 0.1)
-        return
-    
-    def graspBlock(self, cube_pose):
-        self.job_queue.append(cube_pose.point.x, cube_pose.point.y, cube_pose.point.z + self.graspZOffest, 0.1, 0.1)
-        self.job_queue.append('toggle_grip')
-        self.job_queue.append(cube_pose.point.x, cube_pose.point.y, cube_pose.point.z + self.pregraspZOffset, 0.1, 0.1)
-        return
-    
-    def checkPickup(self, cube_pose):
-        return
-    
-    def prePlace(self, place_pose):
-        self.job_queue.append(place_pose.point.x, place_pose.point.y, place_pose.point.z + self.prePlaceZOffeset, 0.1, 0.1)
-        return
-    
-    def placeBlock(self, place_pose):
-        return
+    def _handle_check(self, _request, response):
+        ok = self._move_to(CHECK_X, CHECK_Y, CHECK_Z, vel=0.15, accel=0.15)
+        return self._result(response, ok, 'move_to_check')
 
-    
+    def _handle_place(self, _request, response):
+        if self.place_pose is None:
+            return self._fail(response, 'No place pose received')
+        p = self.place_pose.pose
+        ox, oy, oz, ow = p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w
 
-    def execute_jobs(self):
-        if not self.job_queue:
-            self.get_logger().info("All jobs completed.")
-            rclpy.shutdown()
-            return
+        ok = (self._move_to(p.position.x, p.position.y, p.position.z + self.PRE_PLACE_OFFSET,
+                            ox, oy, oz, ow, vel=0.1, accel=0.1)
+              and self._move_to(p.position.x, p.position.y, p.position.z + self.PLACE_OFFSET,
+                                ox, oy, oz, ow, vel=0.05, accel=0.05)
+              and self._toggle_gripper()
+              and self._move_to(p.position.x, p.position.y, p.position.z + self.PRE_PLACE_OFFSET,
+                                ox, oy, oz, ow, vel=0.1, accel=0.1))
+        return self._result(response, ok, 'place')
 
-        self.get_logger().info(f"Executing job queue, {len(self.job_queue)} jobs remaining.")
-        next_job = self.job_queue.pop(0)
+    # ── Motion helpers ────────────────────────────────────────────────────────
 
-        if isinstance(next_job, tuple):
-            x, y, z, vel_scale, accel_scale = next_job
-            joint_solution = self.ik_planner.compute_ik(self.joint_state, x, y, z)
-            if joint_solution is None:
-                self.get_logger().error("IK failed for position")
+    def _move_to(self, x, y, z, qx=0.0, qy=1.0, qz=0.0, qw=0.0,
+                 vel=0.1, accel=0.1) -> bool:
+        with self._js_lock:
+            js = self.joint_state
+        if js is None:
+            self.get_logger().error('No joint state available')
+            return False
+
+        joint_sol = self.ik_planner.compute_ik(js, x, y, z, qx, qy, qz, qw)
+        if joint_sol is None:
+            return False
+
+        traj = self.ik_planner.plan_to_joints(joint_sol, vel, accel)
+        if traj is None:
+            return False
+
+        return self._execute_traj(traj.joint_trajectory)
+
+    def _execute_traj(self, joint_traj) -> bool:
+        done    = threading.Event()
+        success = [False]
+
+        def on_result(future):
+            try:
+                future.result().result
+                success[0] = True
+            except Exception as e:
+                self.get_logger().error(f'Trajectory failed: {e}')
+            done.set()
+
+        def on_goal_sent(future):
+            gh = future.result()
+            if not gh.accepted:
+                self.get_logger().error('Trajectory rejected')
+                done.set()
                 return
+            gh.get_result_async().add_done_callback(on_result)
 
-            traj = self.ik_planner.plan_to_joints(joint_solution, vel_scale, accel_scale)
-            if traj is None:
-                self.get_logger().error("Failed to plan to position")
-                return
-
-            self.get_logger().info("Planned to position")
-
-            self._execute_joint_trajectory(traj.joint_trajectory)
-        elif next_job == 'toggle_grip':
-            self.get_logger().info("Toggling gripper")
-            self._toggle_gripper()
-        else:
-            self.get_logger().error("Unknown job type.")
-            self.execute_jobs()  # Proceed to next job
-
-    def _toggle_gripper(self):
-        if not self.gripper_cli.wait_for_service(timeout_sec=5.0):
-            self.get_logger().error('Gripper service not available')
-            rclpy.shutdown()
-            return
-
-        req = Trigger.Request()
-        future = self.gripper_cli.call_async(req)
-        # wait for 2 seconds
-        rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
-
-        self.get_logger().info('Gripper toggled.')
-        self.execute_jobs()  # Proceed to next job
-
-            
-    def _execute_joint_trajectory(self, joint_traj):
-        self.get_logger().info('Waiting for controller action server...')
         self.exec_ac.wait_for_server()
-
         goal = FollowJointTrajectory.Goal()
         goal.trajectory = joint_traj
+        self.exec_ac.send_goal_async(goal).add_done_callback(on_goal_sent)
+        done.wait(timeout=60.0)
+        return success[0]
 
-        self.get_logger().info('Sending trajectory to controller...')
-        send_future = self.exec_ac.send_goal_async(goal)
-        print(send_future)
-        send_future.add_done_callback(self._on_goal_sent)
+    def _toggle_gripper(self) -> bool:
+        if not self.gripper_cli.wait_for_service(timeout_sec=5.0):
+            self.get_logger().error('Gripper service not available')
+            return False
+        done   = threading.Event()
+        result = [None]
 
-    def _on_goal_sent(self, future):
-        goal_handle = future.result()
-        if not goal_handle.accepted:
-            self.get_logger().error('bonk')
-            rclpy.shutdown()
-            return
+        def on_done(future):
+            result[0] = future.result()
+            done.set()
 
-        self.get_logger().info('Executing...')
-        result_future = goal_handle.get_result_async()
-        result_future.add_done_callback(self._on_exec_done)
+        self.gripper_cli.call_async(Trigger.Request()).add_done_callback(on_done)
+        done.wait(timeout=5.0)
+        self.get_logger().info('Gripper toggled')
+        return result[0] is not None
 
-    def _on_exec_done(self, future):
-        try:
-            result = future.result().result
-            self.get_logger().info('Execution complete.')
-            self.execute_jobs()  # Proceed to next job
-        except Exception as e:
-            self.get_logger().error(f'Execution failed: {e}')
+    # ── Response helpers ──────────────────────────────────────────────────────
+
+    def _result(self, response, ok, step):
+        response.success = ok
+        response.message = step if ok else f'{step} failed'
+        if not ok:
+            self.get_logger().error(f'{step} failed')
+        return response
+
+    def _fail(self, response, msg):
+        response.success = False
+        response.message = msg
+        self.get_logger().error(msg)
+        return response
 
 
 def main(args=None):
     rclpy.init(args=args)
     node = UR7e_CubeGrasp()
-    rclpy.spin(node)
-    node.destroy_node()
+    executor = MultiThreadedExecutor()
+    executor.add_node(node)
+    executor.add_node(node.ik_planner)  # so IKPlanner futures get processed
+    try:
+        executor.spin()
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
 
 if __name__ == '__main__':
     main()
