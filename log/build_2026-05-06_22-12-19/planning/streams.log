@@ -1,0 +1,38 @@
+[0.800s] Invoking command in '/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/src/planning': PYTHONPATH=/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/planning/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/planning/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/planning build --build-base /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/planning/build install --record /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/planning/install.log --single-version-externally-managed install_data
+[1.014s] running egg_info
+[1.015s] writing ../../build/planning/planning.egg-info/PKG-INFO
+[1.019s] writing dependency_links to ../../build/planning/planning.egg-info/dependency_links.txt
+[1.022s] writing entry points to ../../build/planning/planning.egg-info/entry_points.txt
+[1.025s] writing requirements to ../../build/planning/planning.egg-info/requires.txt
+[1.027s] writing top-level names to ../../build/planning/planning.egg-info/top_level.txt
+[1.035s] reading manifest file '../../build/planning/planning.egg-info/SOURCES.txt'
+[1.037s] writing manifest file '../../build/planning/planning.egg-info/SOURCES.txt'
+[1.040s] running build
+[1.040s] running build_py
+[1.043s] copying planning/ik.py -> /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/planning/build/lib/planning
+[1.049s] copying planning/planning_node.py -> /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/planning/build/lib/planning
+[1.055s] creating /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/planning/build/lib/planning/launch
+[1.056s] copying planning/launch/__init__.py -> /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/planning/build/lib/planning/launch
+[1.061s] copying planning/launch/duplo.launch.py -> /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/planning/build/lib/planning/launch
+[1.065s] running install
+[1.065s] running install_lib
+[1.072s] creating /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/planning/lib/python3.10/site-packages/planning/launch
+[1.074s] copying /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/planning/build/lib/planning/launch/__init__.py -> /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/planning/lib/python3.10/site-packages/planning/launch
+[1.078s] copying /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/planning/build/lib/planning/launch/duplo.launch.py -> /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/planning/lib/python3.10/site-packages/planning/launch
+[1.086s] byte-compiling /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/planning/lib/python3.10/site-packages/planning/launch/__init__.py to __init__.cpython-310.pyc
+[1.093s] byte-compiling /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/planning/lib/python3.10/site-packages/planning/launch/duplo.launch.py to duplo.launch.cpython-310.pyc
+[1.096s] running install_data
+[1.096s]   File "/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/planning/lib/python3.10/site-packages/planning/launch/duplo.launch.py", line 36
+[1.096s]     ExecuteProcess( cmd=[ 'ros2', 'launch', 'realsense2_camera', 'rs_launch.py', 'pointcloud.enable:=true', 
+[1.096s]     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1.096s] SyntaxError: invalid syntax. Perhaps you forgot a comma?
+[1.096s] 
+[1.099s] running install_egg_info
+[1.101s] removing '/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/planning/lib/python3.10/site-packages/planning-0.0.0-py3.10.egg-info' (and everything under it)
+[1.108s] Copying ../../build/planning/planning.egg-info to /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/planning/lib/python3.10/site-packages/planning-0.0.0-py3.10.egg-info
+[1.146s] running install_scripts
+[1.164s] Installing ik script to /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/planning/lib/planning
+[1.167s] Installing main script to /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/planning/lib/planning
+[1.170s] Installing planning_node script to /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/planning/lib/planning
+[1.174s] writing list of installed files to '/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/planning/install.log'
+[1.224s] Invoked command in '/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/src/planning' returned '0': PYTHONPATH=/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/planning/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/planning/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/planning build --build-base /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/planning/build install --record /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/planning/install.log --single-version-externally-managed install_data

@@ -30,8 +30,14 @@ Visualization Manager:
         -Name: RawImage
         Class: rviz_Default_plugins/Image
         Enabled: true
-        Topic: /camera/image_Raw
-    
+        Topic: /camera/camera/color/image_Raw/Image
+        
+    Displays:
+        -Name: RawImage
+        Class: rviz_Default_plugins/Image
+        Enabled: true
+        Topic: /brick_Debug_image/Image
+        
   Class: ""
   Displays:
     - Alpha: 1

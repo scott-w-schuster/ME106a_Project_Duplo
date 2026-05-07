@@ -1,0 +1,31 @@
+[0.772s] Invoking command in '/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/src/planning': PYTHONPATH=/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/planning/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/planning/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/planning build --build-base /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/planning/build install --record /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/planning/install.log --single-version-externally-managed install_data
+[0.961s] running egg_info
+[0.962s] writing ../../build/planning/planning.egg-info/PKG-INFO
+[0.965s] writing dependency_links to ../../build/planning/planning.egg-info/dependency_links.txt
+[0.968s] writing entry points to ../../build/planning/planning.egg-info/entry_points.txt
+[0.970s] writing requirements to ../../build/planning/planning.egg-info/requires.txt
+[0.972s] writing top-level names to ../../build/planning/planning.egg-info/top_level.txt
+[0.980s] reading manifest file '../../build/planning/planning.egg-info/SOURCES.txt'
+[0.982s] writing manifest file '../../build/planning/planning.egg-info/SOURCES.txt'
+[0.984s] running build
+[0.984s] running build_py
+[0.986s] copying planning/launch/duplo.launch.py -> /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/planning/build/lib/planning/launch
+[0.990s] running install
+[0.990s] running install_lib
+[0.993s] copying /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/planning/build/lib/planning/launch/duplo.launch.py -> /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/planning/lib/python3.10/site-packages/planning/launch
+[0.998s] byte-compiling /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/planning/lib/python3.10/site-packages/planning/launch/duplo.launch.py to duplo.launch.cpython-310.pyc
+[1.000s]   File "/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/planning/lib/python3.10/site-packages/planning/launch/duplo.launch.py", line 37
+[1.000s]     ExecuteProcess( cmd=[ 'ros2', 'launch', 'realsense2_camera', 'rs_launch.py', 'pointcloud.enable:=true', 'rgb_camera.color_profile:=1920x1080x30' ])
+[1.000s]     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1.000s] SyntaxError: invalid syntax. Perhaps you forgot a comma?
+[1.000s] 
+[1.000s] running install_data
+[1.000s] running install_egg_info
+[1.001s] removing '/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/planning/lib/python3.10/site-packages/planning-0.0.0-py3.10.egg-info' (and everything under it)
+[1.007s] Copying ../../build/planning/planning.egg-info to /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/planning/lib/python3.10/site-packages/planning-0.0.0-py3.10.egg-info
+[1.037s] running install_scripts
+[1.055s] Installing ik script to /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/planning/lib/planning
+[1.058s] Installing main script to /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/planning/lib/planning
+[1.061s] Installing planning_node script to /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/planning/lib/planning
+[1.064s] writing list of installed files to '/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/planning/install.log'
+[1.118s] Invoked command in '/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/src/planning' returned '0': PYTHONPATH=/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/planning/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/planning/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/planning build --build-base /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/planning/build install --record /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/planning/install.log --single-version-externally-managed install_data

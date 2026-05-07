@@ -13,7 +13,7 @@ COLOR_RANGES = {
     'orange':      [((100, 133, 155), (230, 175, 210))],
     'yellow':      [((140, 112, 170), (255, 148, 228))],
     'light_green': [((75,   72, 158), (220, 120, 225))],
-    'sky_blue':    [((40,  102,  52), (195, 145, 108))],
+    'blue':    [((40,  102,  52), (195, 145, 108))],
     'mint':        [((128,  88,  88), (228, 128, 135))],
     'white':       [((185, 115, 115), (255, 145, 145))],
     'purple':      [((38,  125,  72), (175, 168, 118))],
@@ -33,10 +33,11 @@ class LABTunerNode(Node):
 
     def __init__(self):
         super().__init__('lab_tuner')
-        self.bridge       = CvBridge()
-        self.latest_frame = None
-        self.color_idx    = 0
-        self.ranges       = copy.deepcopy(COLOR_RANGES)
+        self.bridge        = CvBridge()
+        self.latest_frame  = None
+        self.color_idx     = 0
+        self.ranges        = copy.deepcopy(COLOR_RANGES)
+        self._panel_count  = 3
 
         self.create_subscription(
             Image, '/camera/camera/color/image_raw',
@@ -57,9 +58,14 @@ class LABTunerNode(Node):
 
     
     def _build_trackbars(self):
+        try:
+            w = cv2.getWindowImageRect(WINDOW)[2]
+            h = cv2.getWindowImageRect(WINDOW)[3]
+        except Exception:
+            w, h = DISPLAY_W * self._panel_count, DISPLAY_H
         cv2.destroyWindow(WINDOW)
         cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(WINDOW, DISPLAY_W * 3, DISPLAY_H)
+        cv2.resizeWindow(WINDOW, w if w > 0 else DISPLAY_W * self._panel_count, h if h > 0 else DISPLAY_H)
 
         color_name = COLOR_KEYS[self.color_idx]
         lo, hi     = self.ranges[color_name][0]
@@ -118,7 +124,28 @@ class LABTunerNode(Node):
         cv2.putText(masked, f'{px} px', (6, DISPLAY_H - 8),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
 
-        cv2.imshow(WINDOW, np.hstack([orig, mask_3c, masked]))
+        color_name = COLOR_KEYS[self.color_idx]
+        if color_name == 'red':
+            excl = np.zeros(lab.shape[:2], dtype=np.uint8)
+            for neighbor in ('orange', 'pink'):
+                for lo, hi in self.ranges[neighbor]:
+                    excl = cv2.bitwise_or(excl, cv2.inRange(lab, np.array(lo), np.array(hi)))
+            adj_mask   = cv2.bitwise_and(mask, cv2.bitwise_not(excl))
+            adj_masked = cv2.resize(cv2.bitwise_and(frame, frame, mask=adj_mask),
+                                    (DISPLAY_W, DISPLAY_H))
+            label(adj_masked, 'Red (excl. orange+pink)')
+            adj_px = int(np.sum(adj_mask > 0))
+            cv2.putText(adj_masked, f'{adj_px} px', (6, DISPLAY_H - 8),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
+            if self._panel_count != 4:
+                cv2.resizeWindow(WINDOW, DISPLAY_W * 4, DISPLAY_H)
+                self._panel_count = 4
+            cv2.imshow(WINDOW, np.hstack([orig, mask_3c, masked, adj_masked]))
+        else:
+            if self._panel_count != 3:
+                cv2.resizeWindow(WINDOW, DISPLAY_W * 3, DISPLAY_H)
+                self._panel_count = 3
+            cv2.imshow(WINDOW, np.hstack([orig, mask_3c, masked]))
 
         key = cv2.waitKey(1) & 0xFF
 

@@ -8,8 +8,9 @@ setup.py
 ../../build/planning/planning.egg-info/requires.txt
 ../../build/planning/planning.egg-info/top_level.txt
 ../../build/planning/planning.egg-info/zip-safe
+launch/__init__.py
+launch/duplo.launch.py
 planning/__init__.py
-planning/build_planner.py
 planning/ik.py
 planning/main.py
 planning/planning_node.py
