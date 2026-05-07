@@ -84,11 +84,13 @@ class IKPlanner(Node):
     # -----------------------------------------------------------
     # Plan motion given a desired joint configuration
     # -----------------------------------------------------------
-    def plan_to_joints(self, target_joint_state):
+    def plan_to_joints(self, target_joint_state, speed=1.0):
         req = GetMotionPlan.Request()
         req.motion_plan_request.group_name = 'ur_manipulator'
         req.motion_plan_request.allowed_planning_time = 5.0
         req.motion_plan_request.planner_id = "RRTConnectkConfigDefault"
+        req.motion_plan_request.max_velocity_scaling_factor = speed
+        req.motion_plan_request.max_acceleration_scaling_factor = speed
 
         goal_constraints = Constraints()
         for name, pos in zip(target_joint_state.name, target_joint_state.position):

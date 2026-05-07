@@ -36,11 +36,16 @@ BRICK_HEIGHTS = {'half': 0.0096, 'normal': 0.0192, 'tall': 0.0384}
 TF_TIMEOUT_SEC       = 1.0
 PICK_VERIFY_RADIUS_M = 0.05
 
+# Calibration offsets — tune these to align gripper with brick centroid/axis
+GRIPPER_ROT_OFFSET_DEG = 0.0   # +/- degrees to rotate gripper around Z to align with brick long axis
+PICK_X_OFFSET_M        = 0.0   # metres to shift pick pose in X (base_link frame) to center gripper
+PICK_Y_OFFSET_M        = 0.0   # metres to shift pick pose in Y (base_link frame) to center gripper
+
 LATCH = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
 
 def block_rot_to_quat(rotation_deg: float):
-    q = R.from_euler('z', rotation_deg, degrees=True) * R.from_quat([0, 1, 0, 0])
+    q = R.from_euler('z', rotation_deg + GRIPPER_ROT_OFFSET_DEG, degrees=True) * R.from_quat([0, 1, 0, 0])
     x, y, z, w = q.as_quat()
     return float(x), float(y), float(z), float(w)
 
@@ -308,6 +313,8 @@ class LEGOBuildPlanner(Node):
         pick_pose   = brick_match['pose']
         height_type = brick_match.get('height_type', 'normal')
         brick_h     = BRICK_HEIGHTS.get(height_type, BRICK_HEIGHTS['normal'])
+        pick_pose.pose.position.x += PICK_X_OFFSET_M
+        pick_pose.pose.position.y += PICK_Y_OFFSET_M
         pick_pose.pose.position.z += brick_h / 2.0
 
         place_pose = self._grid_to_pose(step)

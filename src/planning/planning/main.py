@@ -21,6 +21,10 @@ CHECK_Z = 0.188
 
 LATCH = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
+SPEED_SLOW = 0.05   # grasping / placing
+SPEED_MED  = 0.15   # approach / retreat
+SPEED_FAST = 0.3    # transit / scan
+
 SCAN_POSES = [
    (0.095,  0.408, 0.288),
    (0.195,  0.408, 0.288),
@@ -99,7 +103,7 @@ class UR7e_CubeGrasp(Node):
             print('[SCAN] FAIL — no joint state received yet', flush=True)
             return self._fail(response, 'no joint state')
         print(f'[SCAN] Joint state OK, calling IK...', flush=True)
-        ok = self._move_to(x, y, z)
+        ok = self._move_to(x, y, z, speed=SPEED_FAST)
         print(f'[SCAN] Move result: {ok}', flush=True)
         return self._result(response, ok, 'scan_pose')
 
@@ -108,7 +112,8 @@ class UR7e_CubeGrasp(Node):
             return self._fail(response, 'No pick pose received')
         p = self.pick_pose.pose
         ok = self._move_to(p.position.x, p.position.y, p.position.z + self.PRE_GRASP_OFFSET,
-                           p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w)
+                           p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w,
+                           speed=SPEED_MED)
         return self._result(response, ok, 'pregrasp')
 
     def _handle_grasp(self, _request, response):
@@ -119,14 +124,14 @@ class UR7e_CubeGrasp(Node):
 
         ok = (self._toggle_gripper()
               and self._move_to(p.position.x, p.position.y, p.position.z + self.GRASP_OFFSET,
-                                ox, oy, oz, ow)
+                                ox, oy, oz, ow, speed=SPEED_SLOW)
               and self._toggle_gripper()
               and self._move_to(p.position.x, p.position.y, p.position.z + self.PRE_GRASP_OFFSET,
-                                ox, oy, oz, ow))
+                                ox, oy, oz, ow, speed=SPEED_MED))
         return self._result(response, ok, 'grasp')
 
     def _handle_check(self, _request, response):
-        ok = self._move_to(CHECK_X, CHECK_Y, CHECK_Z)
+        ok = self._move_to(CHECK_X, CHECK_Y, CHECK_Z, speed=SPEED_FAST)
         return self._result(response, ok, 'move_to_check')
 
     def _handle_place(self, _request, response):
@@ -136,21 +141,21 @@ class UR7e_CubeGrasp(Node):
         ox, oy, oz, ow = p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w
 
         ok = (self._move_to(p.position.x, p.position.y, p.position.z + self.PRE_PLACE_OFFSET,
-                            ox, oy, oz, ow)
+                            ox, oy, oz, ow, speed=SPEED_MED)
               and self._move_to(p.position.x, p.position.y, p.position.z + self.PLACE_OFFSET,
-                                ox, oy, oz, ow)
+                                ox, oy, oz, ow, speed=SPEED_SLOW)
               and self._toggle_gripper()
               and self._move_to(p.position.x, p.position.y, p.position.z + self.PRE_PLACE_OFFSET,
-                                ox, oy, oz, ow))
+                                ox, oy, oz, ow, speed=SPEED_MED))
         return self._result(response, ok, 'place')
 
     # ── Motion helpers ────────────────────────────────────────────────────────
 
-    def _move_to(self, x, y, z, qx=0.0, qy=1.0, qz=0.0, qw=0.0) -> bool:
+    def _move_to(self, x, y, z, qx=0.0, qy=1.0, qz=0.0, qw=0.0, speed=SPEED_MED) -> bool:
         with self._motion_lock:
-            return self._move_to_locked(x, y, z, qx, qy, qz, qw)
+            return self._move_to_locked(x, y, z, qx, qy, qz, qw, speed)
 
-    def _move_to_locked(self, x, y, z, qx=0.0, qy=1.0, qz=0.0, qw=0.0) -> bool:
+    def _move_to_locked(self, x, y, z, qx=0.0, qy=1.0, qz=0.0, qw=0.0, speed=SPEED_MED) -> bool:
         with self._js_lock:
             js = self.joint_state
         if js is None:
@@ -161,7 +166,7 @@ class UR7e_CubeGrasp(Node):
         if joint_sol is None:
             return False
 
-        traj = self.ik_planner.plan_to_joints(joint_sol)
+        traj = self.ik_planner.plan_to_joints(joint_sol, speed=speed)
         if traj is None:
             return False
 
