@@ -121,7 +121,7 @@ class UR7e_CubeGrasp(Node):
         return self._result(response, ok, 'grasp')
 
     def _handle_check(self, _request, response):
-        ok = self._submit(lambda: self._move(CHECK_X, CHECK_Y, CHECK_Z, vel=0.15, accel=0.15))
+        ok = self._submit(lambda: self._move(CHECK_X, CHECK_Y, CHECK_Z))
         return self._result(response, ok, 'move_to_check')
 
     def _handle_place(self, _request, response):
@@ -137,13 +137,12 @@ class UR7e_CubeGrasp(Node):
         if js is None:
             print('[SCAN] FAIL — no joint state received yet', flush=True)
             return False
-        return self._move(x, y, z, vel=0.1, accel=0.1)
+        return self._move(x, y, z)
 
     def _cmd_pregrasp(self, p) -> bool:
         return self._move(
             p.position.x, p.position.y, p.position.z + self.PRE_GRASP_OFFSET,
             p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w,
-            vel=0.1, accel=0.1,
         )
 
     def _cmd_grasp(self, p) -> bool:
@@ -151,26 +150,25 @@ class UR7e_CubeGrasp(Node):
         return (
             self._toggle_gripper()
             and self._move(p.position.x, p.position.y, p.position.z + self.GRASP_OFFSET,
-                           ox, oy, oz, ow, vel=0.05, accel=0.05)
+                           ox, oy, oz, ow)
             and self._toggle_gripper()
             and self._move(p.position.x, p.position.y, p.position.z + self.PRE_GRASP_OFFSET,
-                           ox, oy, oz, ow, vel=0.1, accel=0.1)
+                           ox, oy, oz, ow)
         )
 
     def _cmd_place(self, p) -> bool:
         ox, oy, oz, ow = p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w
         return (
             self._move(p.position.x, p.position.y, p.position.z + self.PRE_PLACE_OFFSET,
-                       ox, oy, oz, ow, vel=0.1, accel=0.1)
+                       ox, oy, oz, ow)
             and self._move(p.position.x, p.position.y, p.position.z + self.PLACE_OFFSET,
-                           ox, oy, oz, ow, vel=0.05, accel=0.05)
+                           ox, oy, oz, ow)
             and self._toggle_gripper()
             and self._move(p.position.x, p.position.y, p.position.z + self.PRE_PLACE_OFFSET,
-                           ox, oy, oz, ow, vel=0.1, accel=0.1)
+                           ox, oy, oz, ow)
         )
 
-    def _move(self, x, y, z, qx=0.0, qy=1.0, qz=0.0, qw=0.0,
-              vel=0.1, accel=0.1) -> bool:
+    def _move(self, x, y, z, qx=0.0, qy=1.0, qz=0.0, qw=0.0) -> bool:
         with self._js_lock:
             js = self.joint_state
         if js is None:
@@ -181,13 +179,12 @@ class UR7e_CubeGrasp(Node):
         if joint_sol is None:
             return False
 
-        traj = self.ik_planner.plan_to_joints(joint_sol, current_joint_state=js, vel=vel, accel=accel)
+        traj = self.ik_planner.plan_to_joints(joint_sol)
         if traj is None:
             return False
 
         jt = traj.joint_trajectory
         self._fix_trajectory_timing(jt)
-        self._recompute_velocities(jt)
         return self._execute_traj(jt)
 
     def _fix_trajectory_timing(self, joint_traj, min_dt=0.1) -> None:
@@ -216,35 +213,6 @@ class UR7e_CubeGrasp(Node):
                 shift  += min_dt - dt
                 t_curr += min_dt - dt
             set_t(pts[i], t_curr)
-
-    def _recompute_velocities(self, joint_traj) -> None:
-        # UR7e joint velocity limits (rad/s) — shoulder, shoulder, elbow, wrist x3
-        VEL_LIMITS = [2.09, 2.09, 3.14, 3.14, 3.14, 3.14]
-
-        pts = joint_traj.points
-        n   = len(pts)
-        if n < 2:
-            return
-
-        def get_t(pt):
-            return pt.time_from_start.sec + pt.time_from_start.nanosec * 1e-9
-
-        n_j = len(pts[0].positions)
-
-        pts[0].velocities  = [0.0] * n_j
-        pts[-1].velocities = [0.0] * n_j
-
-        for i in range(1, n - 1):
-            dt = get_t(pts[i + 1]) - get_t(pts[i - 1])
-            vels = []
-            for j in range(n_j):
-                lim = VEL_LIMITS[j] if j < len(VEL_LIMITS) else 3.14
-                v   = (float(pts[i + 1].positions[j]) - float(pts[i - 1].positions[j])) / dt if dt > 0 else 0.0
-                vels.append(max(-lim, min(lim, v)))
-            pts[i].velocities = vels
-
-        for pt in pts:
-            pt.accelerations = []
 
     def _execute_traj(self, joint_traj) -> bool:
         done    = threading.Event()

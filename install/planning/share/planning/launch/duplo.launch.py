@@ -23,15 +23,6 @@ def generate_launch_description():
   ur_type = LaunchConfiguration("ur_type", default="ur7e")
   launch_rviz = LaunchConfiguration("launch_rviz", default="false")
 
-
-  ik_planner_node = Node(
-      package='planning',
-      executable='ik',
-      name='ik',
-      output='screen'
-  )
-
-
   camera_transform_node = Node(
       package='perception',
       executable='camera_transform',
@@ -41,7 +32,6 @@ def generate_launch_description():
   brick_detection_node = Node(
       package='perception',
       executable='brick_detector',
-      output='screen',
       name='brick_detection_node',
   )
 
@@ -49,7 +39,6 @@ def generate_launch_description():
   planning_main_node = Node(
       package='planning',
       executable='main',
-      output='screen',
   )
 
 
@@ -71,7 +60,6 @@ def generate_launch_description():
       'pointcloud.enable:=true', 'rgb_camera.color_profile:=1920x1080x30'
   ])
 
-
   moveit = ExecuteProcess(cmd=[
       'ros2', 'launch', 'ur_moveit_config', 'ur_moveit.launch.py',
       'ur_type:=ur7e', 'launch_rviz:=false'
@@ -79,8 +67,7 @@ def generate_launch_description():
 
 
   rviz_on = ExecuteProcess(
-      cmd=['rviz2', '-d', rviz_config],
-      output='screen',
+      cmd=['rviz2', '-d', rviz_config]
   )
 
 
