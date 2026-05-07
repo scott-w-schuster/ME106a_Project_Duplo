@@ -227,6 +227,7 @@ class LEGOBuildPlanner(Node):
                 baseplate_found = self._baseplate_visible()
                 if baseplate_found:
                     self.get_logger().info(f'Baseplate found at scan pose {i + 1}/{N_SCAN}.')
+                    break
 
             # Accumulate detections from this viewpoint into scan_inventory.
             # Key by (color, type, 5-cm position bucket) so the same brick seen
