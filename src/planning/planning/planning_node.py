@@ -135,13 +135,17 @@ class LEGOBuildPlanner(Node):
         threading.Thread(target=self._start_worker, daemon=True).start()
 
     def _start_worker(self):
-        for cli in (self.pregrasp_cli, self.grasp_cli, self.check_cli, self.place_cli, self.scan_cli):
-            cli.wait_for_service()
-        self.get_logger().info('All services ready — scanning workspace...')
-        if not self._scan_workspace():
-            self.get_logger().error('Baseplate not detected after full scan — aborting.')
-            return
-        self._execute_step()
+        import traceback
+        try:
+            for cli in (self.pregrasp_cli, self.grasp_cli, self.check_cli, self.place_cli, self.scan_cli):
+                cli.wait_for_service()
+            self.get_logger().info('All services ready — scanning workspace...')
+            if not self._scan_workspace():
+                self.get_logger().error('Baseplate not detected after full scan — aborting.')
+                return
+            self._execute_step()
+        except Exception as e:
+            self.get_logger().error(f'_start_worker crashed: {e}\n{traceback.format_exc()}')
 
     def _scan_workspace(self) -> bool:
         for i in range(12):
