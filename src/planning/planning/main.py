@@ -1,5 +1,6 @@
 import threading
 
+import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.callback_groups import ReentrantCallbackGroup
@@ -144,6 +145,16 @@ class UR7e_CubeGrasp(Node):
                                 ox, oy, oz, ow, vel=0.1, accel=0.1))
         return self._result(response, ok, 'place')
 
+    # ── Joint velocity limits (UR7e hardware maxima, rad/s) ──────────────────
+    _JOINT_VEL_LIMITS = {
+        'shoulder_pan_joint':  2.094,
+        'shoulder_lift_joint': 2.094,
+        'elbow_joint':         3.142,
+        'wrist_1_joint':       3.142,
+        'wrist_2_joint':       3.142,
+        'wrist_3_joint':       3.142,
+    }
+
     # ── Motion helpers ────────────────────────────────────────────────────────
 
     def _move_to(self, x, y, z, qx=0.0, qy=1.0, qz=0.0, qw=0.0,
@@ -162,7 +173,52 @@ class UR7e_CubeGrasp(Node):
         if traj is None:
             return False
 
-        return self._execute_traj(traj.joint_trajectory)
+        jt = traj.joint_trajectory
+        self._sanitize_trajectory(jt, vel)
+        return self._execute_traj(jt)
+
+    def _sanitize_trajectory(self, joint_traj, vel_scale: float) -> None:
+        """Rescale waypoint timing so no joint velocity exceeds hardware limits."""
+        from builtin_interfaces.msg import Duration as RosDuration
+
+        pts   = joint_traj.points
+        names = joint_traj.joint_names
+        if len(pts) < 2:
+            return
+
+        # Ensure first point is anchored at t=0 with zero velocity
+        pts[0].time_from_start = RosDuration(sec=0, nanosec=0)
+        if pts[0].velocities:
+            pts[0].velocities = [0.0] * len(pts[0].velocities)
+
+        t_acc = 0.0
+        for i in range(1, len(pts)):
+            prev = pts[i - 1]
+            curr = pts[i]
+
+            dt_planned = (
+                (curr.time_from_start.sec  - prev.time_from_start.sec) +
+                (curr.time_from_start.nanosec - prev.time_from_start.nanosec) * 1e-9
+            )
+            dt_min = max(dt_planned, 1e-3)  # never let a segment be zero-duration
+
+            for j, name in enumerate(names):
+                limit = self._JOINT_VEL_LIMITS.get(name, 2.094) * vel_scale
+                if limit <= 0:
+                    continue
+                if j < len(curr.positions) and j < len(prev.positions):
+                    delta = abs(float(curr.positions[j]) - float(prev.positions[j]))
+                    dt_min = max(dt_min, delta / limit)
+
+            t_acc += dt_min
+            secs  = int(t_acc)
+            nsecs = int(round((t_acc - secs) * 1e9))
+            pts[i].time_from_start = RosDuration(sec=secs, nanosec=nsecs)
+
+        self.get_logger().debug(
+            f'Trajectory sanitized: {len(pts)} pts, '
+            f'total {t_acc:.2f}s (vel_scale={vel_scale})'
+        )
 
     def _execute_traj(self, joint_traj) -> bool:
         done    = threading.Event()
