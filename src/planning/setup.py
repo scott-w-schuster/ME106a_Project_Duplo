@@ -24,7 +24,6 @@ setup(
     },
     entry_points={
         'console_scripts': [
-        'build_planner=planning.build_planner:main',
         'ik=planning.ik:main',
         'main=planning.main:main',
         'planning_node=planning.planning_node:main',
