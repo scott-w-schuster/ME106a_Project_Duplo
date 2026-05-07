@@ -33,10 +33,11 @@ class LABTunerNode(Node):
 
     def __init__(self):
         super().__init__('lab_tuner')
-        self.bridge       = CvBridge()
-        self.latest_frame = None
-        self.color_idx    = 0
-        self.ranges       = copy.deepcopy(COLOR_RANGES)
+        self.bridge        = CvBridge()
+        self.latest_frame  = None
+        self.color_idx     = 0
+        self.ranges        = copy.deepcopy(COLOR_RANGES)
+        self._panel_count  = 3
 
         self.create_subscription(
             Image, '/camera/camera/color/image_raw',
@@ -57,9 +58,14 @@ class LABTunerNode(Node):
 
     
     def _build_trackbars(self):
+        try:
+            w = cv2.getWindowImageRect(WINDOW)[2]
+            h = cv2.getWindowImageRect(WINDOW)[3]
+        except Exception:
+            w, h = DISPLAY_W * self._panel_count, DISPLAY_H
         cv2.destroyWindow(WINDOW)
         cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(WINDOW, DISPLAY_W * 3, DISPLAY_H)
+        cv2.resizeWindow(WINDOW, w if w > 0 else DISPLAY_W * self._panel_count, h if h > 0 else DISPLAY_H)
 
         color_name = COLOR_KEYS[self.color_idx]
         lo, hi     = self.ranges[color_name][0]
@@ -131,10 +137,14 @@ class LABTunerNode(Node):
             adj_px = int(np.sum(adj_mask > 0))
             cv2.putText(adj_masked, f'{adj_px} px', (6, DISPLAY_H - 8),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
-            cv2.resizeWindow(WINDOW, DISPLAY_W * 4, DISPLAY_H)
+            if self._panel_count != 4:
+                cv2.resizeWindow(WINDOW, DISPLAY_W * 4, DISPLAY_H)
+                self._panel_count = 4
             cv2.imshow(WINDOW, np.hstack([orig, mask_3c, masked, adj_masked]))
         else:
-            cv2.resizeWindow(WINDOW, DISPLAY_W * 3, DISPLAY_H)
+            if self._panel_count != 3:
+                cv2.resizeWindow(WINDOW, DISPLAY_W * 3, DISPLAY_H)
+                self._panel_count = 3
             cv2.imshow(WINDOW, np.hstack([orig, mask_3c, masked]))
 
         key = cv2.waitKey(1) & 0xFF
