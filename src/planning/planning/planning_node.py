@@ -91,7 +91,9 @@ class LEGOBuildPlanner(Node):
                 timeout=10.0,
             )
             resp.raise_for_status()
-            sequence = resp.json()['record']['build_sequence']
+            record = resp.json()['record']
+            raw = record.get('build_sequence') or record.get('sequence', [])
+            sequence = [self._normalize_step(s) for s in raw]
             self.get_logger().info(f'Fetched {len(sequence)} block(s) from JSONBin.')
             return sequence
         except Exception as e:
@@ -105,6 +107,20 @@ class LEGOBuildPlanner(Node):
             except FileNotFoundError:
                 self.get_logger().error(f'Local file {path} not found. No build plan loaded.')
                 return []
+
+    @staticmethod
+    def _normalize_step(s: dict) -> dict:
+        """Map JSONBin step schema → internal schema."""
+        gp = s.get('grid_position', {})
+        return {
+            'type':         s.get('type') or s.get('block_type', '2x4'),
+            'color':        s.get('color', 'unknown'),
+            'layer':        s.get('layer', gp.get('y', 0)),
+            'grid_x':       s.get('grid_x', gp.get('x', 0)),
+            'grid_z':       s.get('grid_z', gp.get('z', 0)),
+            'rotation_deg': s.get('rotation_deg', 0),
+            'height_type':  s.get('height_type', 'normal'),
+        }
 
     def _compute_layer_heights(self) -> dict:
         layers = {}
