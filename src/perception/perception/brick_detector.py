@@ -229,6 +229,10 @@ class BrickDetectorNode(Node):
                 cv2.drawContours(debug, [box_pts], 0, (0, 200, 0), 2)
                 cv2.putText(debug, 'baseplate', tuple(box_pts[0]),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 0), 2)
+            else:
+                self.get_logger().warn(
+                    'Baseplate not detected (HSV + ArUco both failed)',
+                    throttle_duration_sec=5.0)
 
         if self.latest_xyz is None or self.latest_pc_bgr is None:
             self.debug_pub.publish(self.bridge.cv2_to_imgmsg(debug, encoding='bgr8'))
@@ -749,21 +753,27 @@ class BrickDetectorNode(Node):
         return X, Y, Z, angle_deg, box_pts
 
     def publish_baseplate_tf(self, X, Y, Z, angle_deg):
-        camera_frame = self.get_parameter('camera_frame').get_parameter_value().string_value
-
         pose_cam = Pose()
         pose_cam.position.x, pose_cam.position.y, pose_cam.position.z = X, Y, Z
         q = Rotation.from_euler('z', angle_deg, degrees=True).as_quat()
         pose_cam.orientation.x, pose_cam.orientation.y = q[0], q[1]
         pose_cam.orientation.z, pose_cam.orientation.w = q[2], q[3]
 
-        try:
-            tf = self.tf_buffer.lookup_transform(
-                'base_link', camera_frame,
-                rclpy.time.Time(), timeout=Duration(seconds=TF_TIMEOUT_SEC))
-            pose_base = tf2_geometry_msgs.do_transform_pose(pose_cam, tf)
-        except (tf2_ros.LookupException, tf2_ros.ExtrapolationException) as e:
-            self.get_logger().warn(f'Baseplate TF lookup failed: {e}')
+        for frame in ('camera_color_optical_frame',
+                      self.get_parameter('camera_frame').get_parameter_value().string_value):
+            try:
+                tf = self.tf_buffer.lookup_transform(
+                    'base_link', frame,
+                    rclpy.time.Time(), timeout=Duration(seconds=0.1))
+                pose_base = tf2_geometry_msgs.do_transform_pose(pose_cam, tf)
+                break
+            except (tf2_ros.LookupException, tf2_ros.ExtrapolationException):
+                pass
+        else:
+            self.get_logger().warn(
+                'publish_baseplate_tf: no TF from base_link to color frame — '
+                'check camera_transform node is running',
+                throttle_duration_sec=5.0)
             return
 
         t                         = TransformStamped()
