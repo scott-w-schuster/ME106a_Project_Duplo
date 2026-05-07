@@ -687,7 +687,8 @@ class BrickDetectorNode(Node):
 
         gray = cv2.cvtColor(rgb, cv2.COLOR_BGR2GRAY)
         clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-        gray_clahe = clahe.apply(gray)
+        gray_clahe      = clahe.apply(gray)
+        gray_blur_clahe = clahe.apply(cv2.GaussianBlur(gray, (5, 5), 1.0))
 
         try:
             self.aruco_debug_pub.publish(
@@ -695,35 +696,55 @@ class BrickDetectorNode(Node):
         except Exception:
             pass
 
-        for gray_img, label in ((gray, 'raw'), (gray_clahe, 'CLAHE')):
-            result = self._aruco_detect_on(gray_img, label)
+        # (label, image, minMarkerPerimeterRate, adaptThreshMin, adaptThreshMax, adaptThreshStep)
+        attempts = [
+            ('raw+permissive',        gray,            0.01, 3,   53,  4),
+            ('clahe+permissive',      gray_clahe,      0.01, 3,   53,  4),
+            ('raw+default',           gray,            0.03, 3,   23, 10),
+            ('clahe+default',         gray_clahe,      0.03, 3,   23, 10),
+            ('blur_clahe+permissive', gray_blur_clahe, 0.01, 3,   53,  4),
+            ('raw+wide',              gray,            0.01, 3,  103,  8),
+        ]
+
+        for label, img, min_perim, amin, amax, astep in attempts:
+            result = self._aruco_detect_on(img, label, min_perim, amin, amax, astep)
             if result is not None:
                 return result
+
+        self.get_logger().warn(
+            'ArUco: no markers detected after all attempts — '
+            'check DICT_4X4_50 marker ID 0 is visible and well-lit',
+            throttle_duration_sec=5.0)
         return None
 
-    def _aruco_detect_on(self, gray: np.ndarray, label: str):
+    def _aruco_detect_on(self, gray: np.ndarray, label: str,
+                         min_perim: float = 0.01,
+                         adapt_min: int = 3, adapt_max: int = 53, adapt_step: int = 4):
         try:
             aruco_dict = cv2.aruco.getPredefinedDictionary(ARUCO_DICT_ID)
             params     = cv2.aruco.DetectorParameters()
-            params.minMarkerPerimeterRate    = 0.01
-            params.adaptiveThreshWinSizeMin  = 3
-            params.adaptiveThreshWinSizeMax  = 53
-            params.adaptiveThreshWinSizeStep = 4
-            detector   = cv2.aruco.ArucoDetector(aruco_dict, params)
+            params.minMarkerPerimeterRate    = min_perim
+            params.adaptiveThreshWinSizeMin  = adapt_min
+            params.adaptiveThreshWinSizeMax  = adapt_max
+            params.adaptiveThreshWinSizeStep = adapt_step
+            params.errorCorrectionRate       = 0.8
+            try:
+                params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+            except AttributeError:
+                pass
+            detector = cv2.aruco.ArucoDetector(aruco_dict, params)
             corners, ids, _ = detector.detectMarkers(gray)
         except AttributeError:
             aruco_dict = cv2.aruco.Dictionary_get(ARUCO_DICT_ID)
             params     = cv2.aruco.DetectorParameters_create()
-            params.minMarkerPerimeterRate    = 0.01
-            params.adaptiveThreshWinSizeMin  = 3
-            params.adaptiveThreshWinSizeMax  = 53
-            params.adaptiveThreshWinSizeStep = 4
+            params.minMarkerPerimeterRate    = min_perim
+            params.adaptiveThreshWinSizeMin  = adapt_min
+            params.adaptiveThreshWinSizeMax  = adapt_max
+            params.adaptiveThreshWinSizeStep = adapt_step
+            params.errorCorrectionRate       = 0.8
             corners, ids, _ = cv2.aruco.detectMarkers(gray, aruco_dict, parameters=params)
 
         if ids is None:
-            self.get_logger().warn(
-                f'ArUco [{label}]: no markers detected (DICT_4X4_50)',
-                throttle_duration_sec=5.0)
             return None
 
         self.get_logger().info(
@@ -744,9 +765,9 @@ class BrickDetectorNode(Node):
             tvec = tvecs[0][0]
             R_mat, _ = cv2.Rodrigues(rvec)
             origin_cam = tvec + R_mat @ ARUCO_TO_BP_OFFSET
-            X = float(origin_cam[0])
-            Y = float(origin_cam[1])
-            Z = float(origin_cam[2])
+            X         = float(origin_cam[0])
+            Y         = float(origin_cam[1])
+            Z         = float(origin_cam[2])
             angle_deg = float(np.degrees(np.arctan2(R_mat[1, 0], R_mat[0, 0])))
             box_pts   = np.int0(corners[i].reshape(4, 2))
             self.get_logger().info(f'Baseplate detected via ArUco [{label}].')
@@ -824,7 +845,7 @@ class BrickDetectorNode(Node):
         t.transform.translation.y = pose_base.position.y
         t.transform.translation.z = pose_base.position.z
         t.transform.rotation      = pose_base.orientation
-        self.static_tf_broadcaster.sendTransform(t)
+        self.tf_broadcaster.sendTransform(t)
 
     def _update_tracks(self, bricks_base: list):
         for track in self._tracks:
