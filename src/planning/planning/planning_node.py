@@ -165,6 +165,8 @@ class LEGOBuildPlanner(Node):
                 self.get_logger().warn('Baseplate not detected after full scan — retrying.')
                 self._started = False
                 return
+            self._scan_for_bricks()
+            self._verify_build_inventory()
             self._execute_step()
         except Exception as e:
             print(f'[PLANNER] CRASH: {e}\n{traceback.format_exc()}', flush=True)
@@ -216,6 +218,64 @@ class LEGOBuildPlanner(Node):
             except (tf2_ros.LookupException, tf2_ros.ExtrapolationException):
                 pass
         return False
+
+    def _call_scan_pose(self) -> bool:
+        done = threading.Event()
+        resp = [None]
+
+        def _cb(future, _r=resp, _d=done):
+            try:
+                _r[0] = future.result()
+            except Exception as e:
+                self.get_logger().error(f'Scan service error: {e}')
+            _d.set()
+
+        self.scan_cli.call_async(Trigger.Request()).add_done_callback(_cb)
+        if not done.wait(timeout=90.0):
+            self.get_logger().warn('Scan pose timed out')
+            return False
+        return resp[0] is not None and resp[0].success
+
+    def _scan_for_bricks(self) -> None:
+        """Visit every scan pose once so the full table is visible to the camera."""
+        N_SCAN_POSES = 7  # must match len(SCAN_POSES) in main.py
+        self.get_logger().info(f'Full brick scan: visiting all {N_SCAN_POSES} poses...')
+        for i in range(N_SCAN_POSES):
+            print(f'[PLANNER] Brick scan pose {i + 1}/{N_SCAN_POSES}', flush=True)
+            self._call_scan_pose()
+            time.sleep(1.5)   # let perception integrate the new viewpoint
+        self.get_logger().info('Brick scan complete.')
+
+    def _verify_build_inventory(self) -> bool:
+        """Compare detected bricks against the build plan and log what is present/missing."""
+        required: dict = {}
+        for step in self.build_sequence:
+            key = (step['color'], step['type'])
+            required[key] = required.get(key, 0) + 1
+
+        detected = self._detect_bricks()
+        available: dict = {}
+        for b in detected:
+            key = (b['color'], b['type'])
+            available[key] = available.get(key, 0) + 1
+
+        all_present = True
+        self.get_logger().info('======= Build Inventory Check =======')
+        for (color, btype), needed in sorted(required.items()):
+            have   = available.get((color, btype), 0)
+            status = 'OK     ' if have >= needed else 'MISSING'
+            self.get_logger().info(
+                f'  [{status}] {color} {btype}: need {needed}, detected {have}')
+            if have < needed:
+                all_present = False
+
+        if all_present:
+            self.get_logger().info('All required bricks detected — starting build.')
+        else:
+            self.get_logger().warn(
+                'One or more bricks not detected — build will proceed but may skip steps.')
+        self.get_logger().info('=====================================')
+        return all_present
 
     def _execute_step(self):
         if self.current_step >= len(self.build_sequence):
