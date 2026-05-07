@@ -66,8 +66,7 @@ class IKPlanner(Node):
         self.get_logger().info('IK solution found.')
         return result.solution.joint_state
 
-    def plan_to_joints(self, target_joint_state, velocity_scale=0.1, accel_scale=0.1,
-                       start_joint_state=None):
+    def plan_to_joints(self, target_joint_state, velocity_scale=0.1, accel_scale=0.1):
         req = GetMotionPlan.Request()
         req.motion_plan_request.group_name                      = 'ur_manipulator'
         req.motion_plan_request.allowed_planning_time           = 5.0
@@ -75,8 +74,6 @@ class IKPlanner(Node):
         req.motion_plan_request.planner_id                      = 'RRTConnectkConfigDefault'
         req.motion_plan_request.max_velocity_scaling_factor     = velocity_scale
         req.motion_plan_request.max_acceleration_scaling_factor = accel_scale
-        if start_joint_state is not None:
-            req.motion_plan_request.start_state.joint_state = start_joint_state
 
         goal_constraints = Constraints()
         for name, pos in zip(target_joint_state.name, target_joint_state.position):
