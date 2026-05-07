@@ -1,29 +1,15 @@
 import os
-from pathlib import Path
-import sys
 
 from launch import LaunchDescription
 from launch.actions import ExecuteProcess
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 
+
 def generate_launch_description():
-    # Import camera config inside the function so path hack is guaranteed to run first
-    dir_path = os.path.dirname(os.path.realpath(__file__))
-    if dir_path not in sys.path:
-        sys.path.append(dir_path)
-    from camera_config import CameraConfig, USB_CAM_DIR
-
-    cameras = [
-        CameraConfig(
-            name='camera1',
-            param_path=Path(USB_CAM_DIR, 'config', 'params.yaml')
-        )
-    ]
-
-    rviz_config_dir = os.path.join(
+    rviz_config = os.path.join(
         get_package_share_directory('planning'),
-        'rviz',
+        'planning',
         'duplo_config.rviz'
     )
 
@@ -40,30 +26,26 @@ def generate_launch_description():
         ),
         Node(
             package='perception',
-            executable='static_tf_transform.py'
+            executable='camera_transform',
         ),
         Node(
             package='perception',
             executable='brick_detector',
             output='screen',
-            name='Brick_detection_node'
+            name='brick_detection_node',
         ),
         Node(
             package='planning',
             executable='main',
-            output='screen'
+            output='screen',
         ),
         Node(
             package='planning',
-            executable='ik'
-        ),
-        Node(
-            package='planning',
-            executable='planning_node'
+            executable='planning_node',
+            output='screen',
         ),
         ExecuteProcess(
-            cmd=['rviz2', '-d', 'duplo_config.rviz'],
-            output='screen'
+            cmd=['rviz2', '-d', rviz_config],
+            output='screen',
         ),
     ])
-
