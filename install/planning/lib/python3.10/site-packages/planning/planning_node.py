@@ -18,7 +18,19 @@ import tf2_ros
 import tf2_geometry_msgs
 
 STUD_PITCH_M = 0.016
-BLOCK_DIMS   = {'2x2': (2, 2), '2x4': (2, 4), '2x6': (2, 6)}
+BLOCK_DIMS   = {
+    '1x2':                  (1, 2),
+    '2x2':                  (2, 2),
+    '2x4':                  (2, 4),
+    '2x6':                  (2, 6),
+    '2x4-fillet-top-both':  (2, 4),
+    '2x4-fillet-bot-both':  (2, 4),
+    '2x3-fillet-top':       (2, 3),
+    '2x4-half':             (2, 4),
+    '2x6-half':             (2, 6),
+    '1x2-double':           (1, 2),
+    '2x2-cylinder':         (2, 2),
+}
 BRICK_HEIGHTS = {'half': 0.0096, 'normal': 0.0192, 'tall': 0.0384}
 
 TF_TIMEOUT_SEC       = 1.0
@@ -58,6 +70,7 @@ class LEGOBuildPlanner(Node):
         self.grasp_cli    = self.create_client(Trigger, '/grasp')
         self.check_cli    = self.create_client(Trigger, '/move_to_check')
         self.place_cli    = self.create_client(Trigger, '/preplace_and_place')
+        self.scan_cli     = self.create_client(Trigger, '/next_scan_pose')
 
         self.create_subscription(PoseArray, '/detected_bricks',      self._on_bricks,      10)
         self.create_subscription(String,    '/detected_bricks_meta', self._on_bricks_meta, 10)
@@ -78,16 +91,36 @@ class LEGOBuildPlanner(Node):
                 timeout=10.0,
             )
             resp.raise_for_status()
-            sequence = resp.json()['record']['build_sequence']
+            record = resp.json()['record']
+            raw = record.get('build_sequence') or record.get('sequence', [])
+            sequence = [self._normalize_step(s) for s in raw]
             self.get_logger().info(f'Fetched {len(sequence)} block(s) from JSONBin.')
             return sequence
         except Exception as e:
             self.get_logger().warn(f'JSONBin fetch failed ({e}), falling back to local file.')
             path = self.get_parameter('build_plan_path').get_parameter_value().string_value
-            with open(path) as f:
-                sequence = json.load(f)
-            self.get_logger().info(f'Loaded {len(sequence)} block(s) from local file.')
-            return sequence
+            try:
+                with open(path) as f:
+                    sequence = json.load(f)
+                self.get_logger().info(f'Loaded {len(sequence)} block(s) from local file.')
+                return sequence
+            except FileNotFoundError:
+                self.get_logger().error(f'Local file {path} not found. No build plan loaded.')
+                return []
+
+    @staticmethod
+    def _normalize_step(s: dict) -> dict:
+        """Map JSONBin step schema → internal schema."""
+        gp = s.get('grid_position', {})
+        return {
+            'type':         s.get('type') or s.get('block_type', '2x4'),
+            'color':        s.get('color', 'unknown'),
+            'layer':        s.get('layer', gp.get('y', 0)),
+            'grid_x':       s.get('grid_x', gp.get('x', 0)),
+            'grid_z':       s.get('grid_z', gp.get('z', 0)),
+            'rotation_deg': s.get('rotation_deg', 0),
+            'height_type':  s.get('height_type', 'normal'),
+        }
 
     def _compute_layer_heights(self) -> dict:
         layers = {}
@@ -118,13 +151,58 @@ class LEGOBuildPlanner(Node):
         threading.Thread(target=self._start_worker, daemon=True).start()
 
     def _start_worker(self):
-        for cli in (self.pregrasp_cli, self.grasp_cli, self.check_cli, self.place_cli):
-            cli.wait_for_service()
-        self.get_logger().info('All services ready — waiting for baseplate_frame...')
-        if not self._wait_for_baseplate(timeout_sec=30.0):
-            self.get_logger().error('Baseplate not detected after 30 s — aborting.')
-            return
-        self._execute_step()
+        import traceback
+        try:
+            for cli in (self.pregrasp_cli, self.grasp_cli, self.check_cli, self.place_cli, self.scan_cli):
+                while not cli.wait_for_service(timeout_sec=5.0):
+                    print(f'[PLANNER] Waiting for service {cli.srv_name} ...', flush=True)
+                    if not rclpy.ok():
+                        return
+            print('[PLANNER] All services ready — starting scan', flush=True)
+            self.get_logger().info('All services ready — scanning workspace...')
+            if not self._scan_workspace():
+                print('[PLANNER] Scan complete — baseplate not found — will retry in 5 s', flush=True)
+                self.get_logger().warn('Baseplate not detected after full scan — retrying.')
+                self._started = False
+                return
+            self._execute_step()
+        except Exception as e:
+            print(f'[PLANNER] CRASH: {e}\n{traceback.format_exc()}', flush=True)
+            self.get_logger().error(f'_start_worker crashed: {e}\n{traceback.format_exc()}')
+            self._started = False
+
+    def _scan_workspace(self) -> bool:
+        for i in range(12):
+            print(f'[PLANNER] Scan pose {i + 1}/12', flush=True)
+            self.get_logger().info(f'Scan pose {i + 1}/12 — moving arm...')
+            done = threading.Event()
+            resp = [None]
+
+            def _cb(future, _r=resp, _d=done):
+                try:
+                    _r[0] = future.result()
+                except Exception as e:
+                    self.get_logger().error(f'Scan service error: {e}')
+                _d.set()
+
+            self.scan_cli.call_async(Trigger.Request()).add_done_callback(_cb)
+            if not done.wait(timeout=90.0):
+                self.get_logger().warn(f'Scan pose {i + 1} timed out')
+            elif resp[0] is not None and not resp[0].success:
+                self.get_logger().warn(
+                    f'Scan pose {i + 1} failed: {resp[0].message} '
+                    f'(IK or controller issue)')
+
+            time.sleep(1.0)
+            try:
+                self.tf_buffer.lookup_transform(
+                    'base_link', 'baseplate_frame',
+                    rclpy.time.Time(), timeout=Duration(seconds=0.3))
+                self.get_logger().info('Baseplate found during scan.')
+                return True
+            except (tf2_ros.LookupException, tf2_ros.ExtrapolationException):
+                self.get_logger().info('Baseplate not yet visible — continuing scan...')
+        return self._wait_for_baseplate(timeout_sec=10.0)
 
     def _wait_for_baseplate(self, timeout_sec: float) -> bool:
         deadline = time.time() + timeout_sec
@@ -152,12 +230,17 @@ class LEGOBuildPlanner(Node):
         )
 
         detected = self._detect_bricks()
-        pick_pose = self._find_brick(detected, step['type'], step['color'])
-        if pick_pose is None:
+        brick_match = self._find_brick(detected, step['type'], step['color'])
+        if brick_match is None:
             self.get_logger().error(f'No {step["color"]} {step["type"]} found — skipping')
             self.current_step += 1
             self._execute_step()
             return
+
+        pick_pose   = brick_match['pose']
+        height_type = brick_match.get('height_type', 'normal')
+        brick_h     = BRICK_HEIGHTS.get(height_type, BRICK_HEIGHTS['normal'])
+        pick_pose.pose.position.z += brick_h / 2.0
 
         place_pose = self._grid_to_pose(step)
         if place_pose is None:
@@ -221,7 +304,12 @@ class LEGOBuildPlanner(Node):
             ps = PoseStamped()
             ps.header = poses.header
             ps.pose   = pose
-            result.append({'type': brick_type, 'color': m['color'], 'pose': ps})
+            result.append({
+                'type':        brick_type,
+                'color':       m['color'],
+                'height_type': m.get('height_type', 'normal'),
+                'pose':        ps,
+            })
         return result
 
     def _verify_pickup(self) -> bool:
@@ -249,7 +337,7 @@ class LEGOBuildPlanner(Node):
     def _find_brick(self, detected: list, block_type: str, color: str):
         for b in detected:
             if b['type'] == block_type and b['color'] == color:
-                return b['pose']
+                return b
         return None
 
     def _grid_to_pose(self, step: dict) -> PoseStamped:

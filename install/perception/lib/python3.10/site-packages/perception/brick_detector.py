@@ -54,7 +54,7 @@ BASEPLATE_HSV_LOWER   = (55,  80,  30)
 BASEPLATE_HSV_UPPER   = (80, 200, 100)
 BASEPLATE_MIN_AREA_PX = 5000
 
-ARUCO_DICT_ID       = cv2.aruco.DICT_5X5_250
+ARUCO_DICT_ID       = cv2.aruco.DICT_4X4_50
 ARUCO_MARKER_ID     = 0
 ARUCO_MARKER_SIZE_M = 0.05
 
@@ -157,10 +157,11 @@ class BrickDetectorNode(Node):
             PointCloud2,  '/camera/camera/depth/color/points',
             self.pointcloud_callback, 10)
 
-        self.pose_pub   = self.create_publisher(PoseArray,   '/detected_bricks',      10)
-        self.meta_pub   = self.create_publisher(String,      '/detected_bricks_meta', 10)
-        self.debug_pub  = self.create_publisher(Image,       '/brick_debug_image',    10)
-        self.marker_pub = self.create_publisher(MarkerArray, '/duplo_markers',        10)
+        self.pose_pub        = self.create_publisher(PoseArray,   '/detected_bricks',      10)
+        self.meta_pub        = self.create_publisher(String,      '/detected_bricks_meta', 10)
+        self.debug_pub       = self.create_publisher(Image,       '/brick_debug_image',    10)
+        self.aruco_debug_pub = self.create_publisher(Image,       '/aruco_debug_image',    10)
+        self.marker_pub      = self.create_publisher(MarkerArray, '/duplo_markers',        10)
 
         self.tf_buffer             = tf2_ros.Buffer()
         self.tf_listener           = tf2_ros.TransformListener(self.tf_buffer, self)
@@ -210,28 +211,12 @@ class BrickDetectorNode(Node):
 
 
     def process(self):
-        
-        if self.latest_xyz is None or self.latest_pc_bgr is None:
-            return
         if self.latest_rgb is None:
             return
 
-        seg_bgr = self.latest_pc_bgr.copy()
-        rgb     = self.latest_rgb.copy()
-        depth   = self.latest_depth.copy() if self.latest_depth is not None else None
-        debug   = rgb.copy()
-
-        now_s = self.get_clock().now().nanoseconds * 1e-9
-        if (self._gp_last_fit is None or
-                now_s - self._gp_last_fit > GROUND_PLANE_REFIT_SECS):
-            gp = self._fit_ground_plane(self.latest_xyz)
-            if gp is not None:
-                self.ground_plane = gp
-                self._gp_last_fit = now_s
-
-        if self.ground_plane is None:
-            self.get_logger().warn('Waiting for ground plane fit...', once=True)
-            return
+        rgb   = self.latest_rgb.copy()
+        depth = self.latest_depth.copy() if self.latest_depth is not None else None
+        debug = rgb.copy()
 
         if self.fx is not None:
             bp = (self.detect_baseplate(rgb, depth)
@@ -245,6 +230,29 @@ class BrickDetectorNode(Node):
                 cv2.drawContours(debug, [box_pts], 0, (0, 200, 0), 2)
                 cv2.putText(debug, 'baseplate', tuple(box_pts[0]),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 0), 2)
+            else:
+                self.get_logger().warn(
+                    'Baseplate not detected (HSV + ArUco both failed)',
+                    throttle_duration_sec=5.0)
+
+        if self.latest_xyz is None or self.latest_pc_bgr is None:
+            self.debug_pub.publish(self.bridge.cv2_to_imgmsg(debug, encoding='bgr8'))
+            return
+
+        seg_bgr = self.latest_pc_bgr.copy()
+
+        now_s = self.get_clock().now().nanoseconds * 1e-9
+        if (self._gp_last_fit is None or
+                now_s - self._gp_last_fit > GROUND_PLANE_REFIT_SECS):
+            gp = self._fit_ground_plane(self.latest_xyz)
+            if gp is not None:
+                self.ground_plane = gp
+                self._gp_last_fit = now_s
+
+        if self.ground_plane is None:
+            self.get_logger().warn('Waiting for ground plane fit...', once=True)
+            self.debug_pub.publish(self.bridge.cv2_to_imgmsg(debug, encoding='bgr8'))
+            return
 
         clusters   = self._cluster_above_table(self.latest_xyz, seg_bgr)
         all_bricks = []
@@ -672,23 +680,77 @@ class BrickDetectorNode(Node):
                 return label
         return 'normal'
 
-   
+
     def detect_baseplate_aruco(self, rgb: np.ndarray):
         if self.fx is None:
             return None
+
         gray = cv2.cvtColor(rgb, cv2.COLOR_BGR2GRAY)
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        gray_clahe      = clahe.apply(gray)
+        gray_blur_clahe = clahe.apply(cv2.GaussianBlur(gray, (5, 5), 1.0))
 
         try:
+            self.aruco_debug_pub.publish(
+                self.bridge.cv2_to_imgmsg(gray_clahe, encoding='mono8'))
+        except Exception:
+            pass
+
+        # (label, image, minMarkerPerimeterRate, adaptThreshMin, adaptThreshMax, adaptThreshStep)
+        attempts = [
+            ('raw+permissive',        gray,            0.01, 3,   53,  4),
+            ('clahe+permissive',      gray_clahe,      0.01, 3,   53,  4),
+            ('raw+default',           gray,            0.03, 3,   23, 10),
+            ('clahe+default',         gray_clahe,      0.03, 3,   23, 10),
+            ('blur_clahe+permissive', gray_blur_clahe, 0.01, 3,   53,  4),
+            ('raw+wide',              gray,            0.01, 3,  103,  8),
+        ]
+
+        for label, img, min_perim, amin, amax, astep in attempts:
+            result = self._aruco_detect_on(img, label, min_perim, amin, amax, astep)
+            if result is not None:
+                return result
+
+        self.get_logger().warn(
+            'ArUco: no markers detected after all attempts — '
+            'check DICT_4X4_50 marker ID 0 is visible and well-lit',
+            throttle_duration_sec=5.0)
+        return None
+
+    def _aruco_detect_on(self, gray: np.ndarray, label: str,
+                         min_perim: float = 0.01,
+                         adapt_min: int = 3, adapt_max: int = 53, adapt_step: int = 4):
+        try:
             aruco_dict = cv2.aruco.getPredefinedDictionary(ARUCO_DICT_ID)
-            detector   = cv2.aruco.ArucoDetector(aruco_dict, cv2.aruco.DetectorParameters())
+            params     = cv2.aruco.DetectorParameters()
+            params.minMarkerPerimeterRate    = min_perim
+            params.adaptiveThreshWinSizeMin  = adapt_min
+            params.adaptiveThreshWinSizeMax  = adapt_max
+            params.adaptiveThreshWinSizeStep = adapt_step
+            params.errorCorrectionRate       = 0.8
+            try:
+                params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+            except AttributeError:
+                pass
+            detector = cv2.aruco.ArucoDetector(aruco_dict, params)
             corners, ids, _ = detector.detectMarkers(gray)
         except AttributeError:
             aruco_dict = cv2.aruco.Dictionary_get(ARUCO_DICT_ID)
             params     = cv2.aruco.DetectorParameters_create()
+            params.minMarkerPerimeterRate    = min_perim
+            params.adaptiveThreshWinSizeMin  = adapt_min
+            params.adaptiveThreshWinSizeMax  = adapt_max
+            params.adaptiveThreshWinSizeStep = adapt_step
+            params.errorCorrectionRate       = 0.8
             corners, ids, _ = cv2.aruco.detectMarkers(gray, aruco_dict, parameters=params)
 
         if ids is None:
             return None
+
+        self.get_logger().info(
+            f'ArUco [{label}]: found markers {ids.flatten().tolist()} — '
+            f'looking for ID {ARUCO_MARKER_ID}',
+            throttle_duration_sec=2.0)
 
         cam_mat = np.array([[self.fx, 0, self.cx],
                             [0, self.fy, self.cy],
@@ -697,19 +759,25 @@ class BrickDetectorNode(Node):
         for i, mid in enumerate(ids.flatten()):
             if mid != ARUCO_MARKER_ID:
                 continue
-            rvecs, tvecs, _ = cv2.aruco.estimatePoseSingleMarkers(
-                [corners[i]], ARUCO_MARKER_SIZE_M, cam_mat, self.dist_coeffs
-            )
-            rvec = rvecs[0][0]
-            tvec = tvecs[0][0]
+            half = ARUCO_MARKER_SIZE_M / 2.0
+            obj_pts = np.array([
+                [-half,  half, 0],
+                [ half,  half, 0],
+                [ half, -half, 0],
+                [-half, -half, 0],
+            ], dtype=np.float32)
+            _, rvec, tvec = cv2.solvePnP(
+                obj_pts, corners[i].reshape(4, 2), cam_mat, self.dist_coeffs)
+            rvec = rvec.flatten()
+            tvec = tvec.flatten()
             R_mat, _ = cv2.Rodrigues(rvec)
             origin_cam = tvec + R_mat @ ARUCO_TO_BP_OFFSET
-            X = float(origin_cam[0])
-            Y = float(origin_cam[1])
-            Z = float(origin_cam[2])
+            X         = float(origin_cam[0])
+            Y         = float(origin_cam[1])
+            Z         = float(origin_cam[2])
             angle_deg = float(np.degrees(np.arctan2(R_mat[1, 0], R_mat[0, 0])))
             box_pts   = np.int0(corners[i].reshape(4, 2))
-            self.get_logger().info('Baseplate detected via ArUco fallback.')
+            self.get_logger().info(f'Baseplate detected via ArUco [{label}].')
             return X, Y, Z, angle_deg, box_pts
 
         return None
@@ -723,11 +791,18 @@ class BrickDetectorNode(Node):
                                 cv2.MORPH_CLOSE, k)
 
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not contours: return None
+        if not contours:
+            self.get_logger().warn(
+                'HSV baseplate: no contours found — HSV range may not match baseplate color',
+                throttle_duration_sec=5.0)
+            return None
 
         largest = max(contours, key=cv2.contourArea)
-        if cv2.contourArea(largest) < BASEPLATE_MIN_AREA_PX:
-            self.get_logger().warn('Baseplate blob too small', once=True)
+        area = cv2.contourArea(largest)
+        if area < BASEPLATE_MIN_AREA_PX:
+            self.get_logger().warn(
+                f'HSV baseplate: largest contour {area:.0f}px < {BASEPLATE_MIN_AREA_PX}px minimum',
+                throttle_duration_sec=5.0)
             return None
 
         rect = cv2.minAreaRect(largest)
@@ -746,21 +821,27 @@ class BrickDetectorNode(Node):
         return X, Y, Z, angle_deg, box_pts
 
     def publish_baseplate_tf(self, X, Y, Z, angle_deg):
-        camera_frame = self.get_parameter('camera_frame').get_parameter_value().string_value
-
         pose_cam = Pose()
         pose_cam.position.x, pose_cam.position.y, pose_cam.position.z = X, Y, Z
         q = Rotation.from_euler('z', angle_deg, degrees=True).as_quat()
         pose_cam.orientation.x, pose_cam.orientation.y = q[0], q[1]
         pose_cam.orientation.z, pose_cam.orientation.w = q[2], q[3]
 
-        try:
-            tf = self.tf_buffer.lookup_transform(
-                'base_link', camera_frame,
-                rclpy.time.Time(), timeout=Duration(seconds=TF_TIMEOUT_SEC))
-            pose_base = tf2_geometry_msgs.do_transform_pose(pose_cam, tf)
-        except (tf2_ros.LookupException, tf2_ros.ExtrapolationException) as e:
-            self.get_logger().warn(f'Baseplate TF lookup failed: {e}')
+        for frame in ('camera_color_depth_frame',
+                      self.get_parameter('camera_frame').get_parameter_value().string_value):
+            try:
+                tf = self.tf_buffer.lookup_transform(
+                    'base_link', frame,
+                    rclpy.time.Time(), timeout=Duration(seconds=0.1))
+                pose_base = tf2_geometry_msgs.do_transform_pose(pose_cam, tf)
+                break
+            except (tf2_ros.LookupException, tf2_ros.ExtrapolationException):
+                pass
+        else:
+            self.get_logger().warn(
+                'publish_baseplate_tf: no TF from base_link to color frame — '
+                'check camera_transform node is running',
+                throttle_duration_sec=5.0)
             return
 
         t                         = TransformStamped()
@@ -771,7 +852,7 @@ class BrickDetectorNode(Node):
         t.transform.translation.y = pose_base.position.y
         t.transform.translation.z = pose_base.position.z
         t.transform.rotation      = pose_base.orientation
-        self.static_tf_broadcaster.sendTransform(t)
+        self.tf_broadcaster.sendTransform(t)
 
     def _update_tracks(self, bricks_base: list):
         for track in self._tracks:
