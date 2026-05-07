@@ -78,7 +78,7 @@ class LEGOBuildPlanner(Node):
                 timeout=10.0,
             )
             resp.raise_for_status()
-            sequence = resp.json()['record']
+            sequence = resp.json()['record']['build_sequence']
             self.get_logger().info(f'Fetched {len(sequence)} block(s) from JSONBin.')
             return sequence
         except Exception as e:
