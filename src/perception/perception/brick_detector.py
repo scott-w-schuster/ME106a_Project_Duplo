@@ -54,7 +54,7 @@ BASEPLATE_HSV_LOWER   = (55,  80,  30)
 BASEPLATE_HSV_UPPER   = (80, 200, 100)
 BASEPLATE_MIN_AREA_PX = 5000
 
-ARUCO_DICT_ID       = cv2.aruco.DICT_4X4_50
+ARUCO_DICT_ID       = cv2.aruco.DICT_5X5_250
 ARUCO_MARKER_ID     = 0
 ARUCO_MARKER_SIZE_M = 0.05
 
@@ -677,6 +677,7 @@ class BrickDetectorNode(Node):
         if self.fx is None:
             return None
         gray = cv2.cvtColor(rgb, cv2.COLOR_BGR2GRAY)
+
         try:
             aruco_dict = cv2.aruco.getPredefinedDictionary(ARUCO_DICT_ID)
             detector   = cv2.aruco.ArucoDetector(aruco_dict, cv2.aruco.DetectorParameters())
@@ -689,13 +690,6 @@ class BrickDetectorNode(Node):
         if ids is None:
             return None
 
-        half    = ARUCO_MARKER_SIZE_M / 2.0
-        obj_pts = np.array([
-            [-half,  half, 0],
-            [ half,  half, 0],
-            [ half, -half, 0],
-            [-half, -half, 0],
-        ], dtype=np.float32)
         cam_mat = np.array([[self.fx, 0, self.cx],
                             [0, self.fy, self.cy],
                             [0,       0,       1]], dtype=np.float32)
@@ -703,17 +697,18 @@ class BrickDetectorNode(Node):
         for i, mid in enumerate(ids.flatten()):
             if mid != ARUCO_MARKER_ID:
                 continue
-            img_pts = corners[i].reshape(4, 2).astype(np.float32)
-            ok, rvec, tvec = cv2.solvePnP(obj_pts, img_pts, cam_mat, self.dist_coeffs)
-            if not ok:
-                continue
+            rvecs, tvecs, _ = cv2.aruco.estimatePoseSingleMarkers(
+                [corners[i]], ARUCO_MARKER_SIZE_M, cam_mat, self.dist_coeffs
+            )
+            rvec = rvecs[0][0]
+            tvec = tvecs[0][0]
             R_mat, _ = cv2.Rodrigues(rvec)
-            origin_cam = tvec.flatten() + R_mat @ ARUCO_TO_BP_OFFSET
+            origin_cam = tvec + R_mat @ ARUCO_TO_BP_OFFSET
             X = float(origin_cam[0])
             Y = float(origin_cam[1])
             Z = float(origin_cam[2])
             angle_deg = float(np.degrees(np.arctan2(R_mat[1, 0], R_mat[0, 0])))
-            box_pts   = np.int0(img_pts)
+            box_pts   = np.int0(corners[i].reshape(4, 2))
             self.get_logger().info('Baseplate detected via ArUco fallback.')
             return X, Y, Z, angle_deg, box_pts
 
