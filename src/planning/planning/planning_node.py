@@ -214,12 +214,17 @@ class LEGOBuildPlanner(Node):
         )
 
         detected = self._detect_bricks()
-        pick_pose = self._find_brick(detected, step['type'], step['color'])
-        if pick_pose is None:
+        brick_match = self._find_brick(detected, step['type'], step['color'])
+        if brick_match is None:
             self.get_logger().error(f'No {step["color"]} {step["type"]} found — skipping')
             self.current_step += 1
             self._execute_step()
             return
+
+        pick_pose   = brick_match['pose']
+        height_type = brick_match.get('height_type', 'normal')
+        brick_h     = BRICK_HEIGHTS.get(height_type, BRICK_HEIGHTS['normal'])
+        pick_pose.pose.position.z += brick_h / 2.0
 
         place_pose = self._grid_to_pose(step)
         if place_pose is None:
@@ -283,7 +288,12 @@ class LEGOBuildPlanner(Node):
             ps = PoseStamped()
             ps.header = poses.header
             ps.pose   = pose
-            result.append({'type': brick_type, 'color': m['color'], 'pose': ps})
+            result.append({
+                'type':        brick_type,
+                'color':       m['color'],
+                'height_type': m.get('height_type', 'normal'),
+                'pose':        ps,
+            })
         return result
 
     def _verify_pickup(self) -> bool:
@@ -311,7 +321,7 @@ class LEGOBuildPlanner(Node):
     def _find_brick(self, detected: list, block_type: str, color: str):
         for b in detected:
             if b['type'] == block_type and b['color'] == color:
-                return b['pose']
+                return b
         return None
 
     def _grid_to_pose(self, step: dict) -> PoseStamped:
