@@ -1,0 +1,6 @@
+{
+  "package_name": "ros2_aruco_interfaces",
+  "non_idl_tuples": [
+    "/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/src/ros2_aruco_interfaces:msg/ArucoMarkers.msg"
+  ]
+}

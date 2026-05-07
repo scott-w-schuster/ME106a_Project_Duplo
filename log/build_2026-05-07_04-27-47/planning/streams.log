@@ -1,0 +1,32 @@
+[1.093s] Invoking command in '/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/src/planning': PYTHONPATH=/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/planning/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/planning/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/planning build --build-base /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/planning/build install --record /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/planning/install.log --single-version-externally-managed install_data
+[1.369s] running egg_info
+[1.370s] writing ../../build/planning/planning.egg-info/PKG-INFO
+[1.374s] writing dependency_links to ../../build/planning/planning.egg-info/dependency_links.txt
+[1.377s] writing entry points to ../../build/planning/planning.egg-info/entry_points.txt
+[1.380s] writing requirements to ../../build/planning/planning.egg-info/requires.txt
+[1.382s] writing top-level names to ../../build/planning/planning.egg-info/top_level.txt
+[1.392s] reading manifest file '../../build/planning/planning.egg-info/SOURCES.txt'
+[1.395s] writing manifest file '../../build/planning/planning.egg-info/SOURCES.txt'
+[1.397s] running build
+[1.397s] running build_py
+[1.403s] copying launch/duplo_launch.py -> /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/planning/build/lib/launch
+[1.408s] running install
+[1.409s] running install_lib
+[1.420s] copying /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/planning/build/lib/launch/duplo_launch.py -> /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/planning/lib/python3.10/site-packages/launch
+[1.434s] byte-compiling /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/planning/lib/python3.10/site-packages/launch/duplo_launch.py to duplo_launch.cpython-310.pyc
+[1.440s] running install_data
+[1.442s] creating /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/planning/share/planning/launch
+[1.444s] copying launch/__init__.py -> /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/planning/share/planning/launch
+[1.447s] copying launch/duplo_launch.py -> /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/planning/share/planning/launch
+[1.451s] creating /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/planning/share/planning/rviz
+[1.453s] copying launch/duplo_config.rviz -> /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/planning/share/planning/rviz
+[1.456s] running install_egg_info
+[1.460s] removing '/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/planning/lib/python3.10/site-packages/planning-0.0.0-py3.10.egg-info' (and everything under it)
+[1.467s] Copying ../../build/planning/planning.egg-info to /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/planning/lib/python3.10/site-packages/planning-0.0.0-py3.10.egg-info
+[1.501s] running install_scripts
+[1.525s] Installing duplo.launch script to /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/planning/lib/planning
+[1.528s] Installing ik script to /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/planning/lib/planning
+[1.530s] Installing main script to /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/planning/lib/planning
+[1.532s] Installing planning_node script to /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/planning/lib/planning
+[1.536s] writing list of installed files to '/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/planning/install.log'
+[1.565s] Invoked command in '/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/src/planning' returned '0': PYTHONPATH=/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/planning/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/planning/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/planning build --build-base /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/planning/build install --record /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/planning/install.log --single-version-externally-managed install_data

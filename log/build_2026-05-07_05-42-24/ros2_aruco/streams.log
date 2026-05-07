@@ -1,0 +1,46 @@
+[2.678s] Invoking command in '/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/src/ros2_aruco': PYTHONPATH=/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/ros2_aruco/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/ros2_aruco/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/ros2_aruco build --build-base /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/ros2_aruco/build install --record /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/ros2_aruco/install.log --single-version-externally-managed install_data
+[2.972s] running egg_info
+[2.973s] creating ../../build/ros2_aruco/ros2_aruco.egg-info
+[2.974s] writing ../../build/ros2_aruco/ros2_aruco.egg-info/PKG-INFO
+[2.980s] writing dependency_links to ../../build/ros2_aruco/ros2_aruco.egg-info/dependency_links.txt
+[2.983s] writing entry points to ../../build/ros2_aruco/ros2_aruco.egg-info/entry_points.txt
+[2.985s] writing requirements to ../../build/ros2_aruco/ros2_aruco.egg-info/requires.txt
+[2.988s] writing top-level names to ../../build/ros2_aruco/ros2_aruco.egg-info/top_level.txt
+[2.990s] writing manifest file '../../build/ros2_aruco/ros2_aruco.egg-info/SOURCES.txt'
+[3.002s] reading manifest file '../../build/ros2_aruco/ros2_aruco.egg-info/SOURCES.txt'
+[3.005s] writing manifest file '../../build/ros2_aruco/ros2_aruco.egg-info/SOURCES.txt'
+[3.007s] running build
+[3.008s] running build_py
+[3.008s] creating /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/ros2_aruco/build
+[3.009s] creating /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/ros2_aruco/build/lib
+[3.010s] creating /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/ros2_aruco/build/lib/ros2_aruco
+[3.012s] copying ros2_aruco/__init__.py -> /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/ros2_aruco/build/lib/ros2_aruco
+[3.016s] copying ros2_aruco/aruco_generate_marker.py -> /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/ros2_aruco/build/lib/ros2_aruco
+[3.024s] copying ros2_aruco/aruco_node.py -> /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/ros2_aruco/build/lib/ros2_aruco
+[3.032s] running install
+[3.033s] running install_lib
+[3.036s] creating /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/ros2_aruco/lib/python3.10/site-packages/ros2_aruco
+[3.037s] copying /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/ros2_aruco/build/lib/ros2_aruco/__init__.py -> /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/ros2_aruco/lib/python3.10/site-packages/ros2_aruco
+[3.042s] copying /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/ros2_aruco/build/lib/ros2_aruco/aruco_generate_marker.py -> /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/ros2_aruco/lib/python3.10/site-packages/ros2_aruco
+[3.048s] copying /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/ros2_aruco/build/lib/ros2_aruco/aruco_node.py -> /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/ros2_aruco/lib/python3.10/site-packages/ros2_aruco
+[3.056s] byte-compiling /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/ros2_aruco/lib/python3.10/site-packages/ros2_aruco/__init__.py to __init__.cpython-310.pyc
+[3.061s] byte-compiling /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/ros2_aruco/lib/python3.10/site-packages/ros2_aruco/aruco_generate_marker.py to aruco_generate_marker.cpython-310.pyc
+[3.067s] byte-compiling /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/ros2_aruco/lib/python3.10/site-packages/ros2_aruco/aruco_node.py to aruco_node.cpython-310.pyc
+[3.074s] running install_data
+[3.075s] creating /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/ros2_aruco/share/ament_index
+[3.076s] creating /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/ros2_aruco/share/ament_index/resource_index
+[3.076s] creating /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/ros2_aruco/share/ament_index/resource_index/packages
+[3.079s] copying resource/ros2_aruco -> /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/ros2_aruco/share/ament_index/resource_index/packages
+[3.084s] copying package.xml -> /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/ros2_aruco/share/ros2_aruco
+[3.090s] creating /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/ros2_aruco/share/ros2_aruco/launch
+[3.091s] copying launch/aruco_recognition.launch.py -> /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/ros2_aruco/share/ros2_aruco/launch
+[3.098s] creating /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/ros2_aruco/share/ros2_aruco/config
+[3.100s] copying config/aruco_parameters.yaml -> /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/ros2_aruco/share/ros2_aruco/config
+[3.107s] copying config/aruco_parameters_old.yaml -> /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/ros2_aruco/share/ros2_aruco/config
+[3.113s] running install_egg_info
+[3.117s] Copying ../../build/ros2_aruco/ros2_aruco.egg-info to /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/ros2_aruco/lib/python3.10/site-packages/ros2_aruco-0.1.0-py3.10.egg-info
+[3.164s] running install_scripts
+[3.184s] Installing aruco_generate_marker script to /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/ros2_aruco/lib/ros2_aruco
+[3.188s] Installing aruco_node script to /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/ros2_aruco/lib/ros2_aruco
+[3.191s] writing list of installed files to '/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/ros2_aruco/install.log'
+[3.236s] Invoked command in '/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/src/ros2_aruco' returned '0': PYTHONPATH=/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/ros2_aruco/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/ros2_aruco/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/ros2_aruco build --build-base /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/ros2_aruco/build install --record /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/ros2_aruco/install.log --single-version-externally-managed install_data

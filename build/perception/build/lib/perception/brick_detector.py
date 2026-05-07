@@ -54,15 +54,30 @@ BASEPLATE_HSV_LOWER   = (55,  80,  30)
 BASEPLATE_HSV_UPPER   = (80, 200, 100)
 BASEPLATE_MIN_AREA_PX = 5000
 
+ARUCO_DICT_ID       = cv2.aruco.DICT_5X5_250
+ARUCO_MARKER_ID     = 0
+ARUCO_MARKER_SIZE_M = 0.05
+
 
 STUD_PITCH_M   = 0.016
 STUD_MIN_RADIUS_PX     = 5
 STUD_MAX_RADIUS_PX     = 20
 STUD_MIN_DIST_PX       = 15
 MAX_BRICK_FOOTPRINT_M2 = (2 * STUD_PITCH_M) * (6 * STUD_PITCH_M) * 2.0
+MIN_BRICK_FOOTPRINT_M2 = (1 * STUD_PITCH_M) * (2 * STUD_PITCH_M) * 0.4
+
+VALID_BRICK_SHAPES = {(1, 2), (2, 2), (2, 4), (2, 6)}
 
 BASEPLATE_ROWS = 16
 BASEPLATE_COLS = 16
+
+# Offset from ArUco marker centre → baseplate stud (0,0) in the marker frame.
+# Marker is edge-flush in the bottom-right corner of a 16×16-stud baseplate.
+ARUCO_TO_BP_OFFSET = np.array([
+    -(BASEPLATE_COLS * STUD_PITCH_M - ARUCO_MARKER_SIZE_M / 2.0),
+    -(BASEPLATE_ROWS * STUD_PITCH_M - ARUCO_MARKER_SIZE_M / 2.0),
+    0.0,
+], dtype=np.float64)
 
 BRICK_HEIGHTS = {
     'half':   0.0096,
@@ -112,6 +127,7 @@ class BrickDetectorNode(Node):
         self.bridge = CvBridge()
 
         self.fx = self.fy = self.cx = self.cy = None
+        self.dist_coeffs = np.zeros(5, dtype=np.float32)
         self.latest_rgb   = None
         self.latest_depth = None
 
@@ -178,6 +194,8 @@ class BrickDetectorNode(Node):
     def camera_info_callback(self, msg: CameraInfo):
         self.fx = msg.k[0];  self.fy = msg.k[4]
         self.cx = msg.k[2];  self.cy = msg.k[5]
+        if msg.d:
+            self.dist_coeffs = np.array(msg.d, dtype=np.float32)
 
     def rgb_callback(self, msg: Image):
         self.latest_rgb = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
@@ -215,8 +233,11 @@ class BrickDetectorNode(Node):
             self.get_logger().warn('Waiting for ground plane fit...', once=True)
             return
 
-        if depth is not None and self.fx is not None:
-            bp = self.detect_baseplate(rgb, depth)
+        if self.fx is not None:
+            bp = (self.detect_baseplate(rgb, depth)
+                  if depth is not None else None)
+            if bp is None:
+                bp = self.detect_baseplate_aruco(rgb)
             if bp is not None:
                 X, Y, Z, angle_deg, box_pts = bp
                 self.baseplate_z_cam = Z
@@ -234,7 +255,14 @@ class BrickDetectorNode(Node):
             if color_name is None:
                 continue
 
+            footprint = self._cluster_footprint_m2(cluster_pts)
+            if footprint < MIN_BRICK_FOOTPRINT_M2:
+                continue
+
             rows, cols, angle_deg = self._shape_and_orientation_from_cluster(cluster_pts)
+
+            if (min(rows, cols), max(rows, cols)) not in VALID_BRICK_SHAPES:
+                continue
 
             centroid  = cluster_pts.mean(axis=0)
             heights   = -(cluster_pts @ normal + d)
@@ -505,7 +533,11 @@ class BrickDetectorNode(Node):
         if self.latest_rgb is not None and self.fx is not None:
             result = self._shape_from_studs(cluster_pts)
             if result is not None:
-                return result
+                stud_rows, stud_cols, angle_deg = result
+                pc_rows, pc_cols, _ = self._shape_from_pointcloud_extent(cluster_pts)
+                if pc_rows * pc_cols > stud_rows * stud_cols * 1.5:
+                    return pc_rows, pc_cols, angle_deg
+                return stud_rows, stud_cols, angle_deg
 
         return self._shape_from_pointcloud_extent(cluster_pts)
 
@@ -641,6 +673,47 @@ class BrickDetectorNode(Node):
         return 'normal'
 
    
+    def detect_baseplate_aruco(self, rgb: np.ndarray):
+        if self.fx is None:
+            return None
+        gray = cv2.cvtColor(rgb, cv2.COLOR_BGR2GRAY)
+
+        try:
+            aruco_dict = cv2.aruco.getPredefinedDictionary(ARUCO_DICT_ID)
+            detector   = cv2.aruco.ArucoDetector(aruco_dict, cv2.aruco.DetectorParameters())
+            corners, ids, _ = detector.detectMarkers(gray)
+        except AttributeError:
+            aruco_dict = cv2.aruco.Dictionary_get(ARUCO_DICT_ID)
+            params     = cv2.aruco.DetectorParameters_create()
+            corners, ids, _ = cv2.aruco.detectMarkers(gray, aruco_dict, parameters=params)
+
+        if ids is None:
+            return None
+
+        cam_mat = np.array([[self.fx, 0, self.cx],
+                            [0, self.fy, self.cy],
+                            [0,       0,       1]], dtype=np.float32)
+
+        for i, mid in enumerate(ids.flatten()):
+            if mid != ARUCO_MARKER_ID:
+                continue
+            rvecs, tvecs, _ = cv2.aruco.estimatePoseSingleMarkers(
+                [corners[i]], ARUCO_MARKER_SIZE_M, cam_mat, self.dist_coeffs
+            )
+            rvec = rvecs[0][0]
+            tvec = tvecs[0][0]
+            R_mat, _ = cv2.Rodrigues(rvec)
+            origin_cam = tvec + R_mat @ ARUCO_TO_BP_OFFSET
+            X = float(origin_cam[0])
+            Y = float(origin_cam[1])
+            Z = float(origin_cam[2])
+            angle_deg = float(np.degrees(np.arctan2(R_mat[1, 0], R_mat[0, 0])))
+            box_pts   = np.int0(corners[i].reshape(4, 2))
+            self.get_logger().info('Baseplate detected via ArUco fallback.')
+            return X, Y, Z, angle_deg, box_pts
+
+        return None
+
     def detect_baseplate(self, rgb: np.ndarray, depth: np.ndarray):
         hsv  = cv2.cvtColor(rgb, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, np.array(BASEPLATE_HSV_LOWER),

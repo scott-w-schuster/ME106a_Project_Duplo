@@ -10,6 +10,8 @@ setup.py
 ../../build/planning/planning.egg-info/zip-safe
 launch/__init__.py
 launch/duplo.launch.py
+launch/duplo_config.rviz
+launch/duplo_launch.py
 planning/__init__.py
 planning/ik.py
 planning/main.py
