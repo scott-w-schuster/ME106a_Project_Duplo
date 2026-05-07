@@ -91,7 +91,15 @@ class UR7e_CubeGrasp(Node):
     def _handle_scan_pose(self, _request, response):
         x, y, z = SCAN_POSES[self._scan_idx % len(SCAN_POSES)]
         self._scan_idx += 1
+        print(f'[SCAN] Moving to ({x:.3f}, {y:.3f}, {z:.3f})', flush=True)
+        with self._js_lock:
+            js = self.joint_state
+        if js is None:
+            print('[SCAN] FAIL — no joint state received yet', flush=True)
+            return self._fail(response, 'no joint state')
+        print(f'[SCAN] Joint state OK, calling IK...', flush=True)
         ok = self._move_to(x, y, z, vel=0.2, accel=0.2)
+        print(f'[SCAN] Move result: {ok}', flush=True)
         return self._result(response, ok, 'scan_pose')
 
     def _handle_pregrasp(self, _request, response):
