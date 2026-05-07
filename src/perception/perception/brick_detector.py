@@ -350,7 +350,7 @@ class BrickDetectorNode(Node):
         return clusters
 
     def _classify_cluster_color(self, cluster_bgr: np.ndarray):
-        
+
         lab_pts = cv2.cvtColor(
             cluster_bgr.reshape(1, -1, 3), cv2.COLOR_BGR2LAB
         ).reshape(-1, 3).astype(np.float32)
@@ -361,14 +361,24 @@ class BrickDetectorNode(Node):
         if len(lab_pts) < 5:
             return None
 
+        def match_mask(pts, ranges):
+            mask = np.zeros(len(pts), dtype=bool)
+            for lower, upper in ranges:
+                mask |= np.all(
+                    (pts >= np.array(lower, np.float32)) &
+                    (pts <= np.array(upper, np.float32)), axis=1)
+            return mask
+
+        orange_mask = match_mask(lab_pts, COLOR_RANGES['orange'])
+        pink_mask   = match_mask(lab_pts, COLOR_RANGES['pink'])
+
         best_color = None
         best_count = 0
         for color_name, ranges in COLOR_RANGES.items():
-            count = 0
-            for lower, upper in ranges:
-                lo = np.array(lower, dtype=np.float32)
-                hi = np.array(upper, dtype=np.float32)
-                count += int(np.sum(np.all((lab_pts >= lo) & (lab_pts <= hi), axis=1)))
+            m = match_mask(lab_pts, ranges)
+            if color_name == 'red':
+                m = m & ~orange_mask & ~pink_mask
+            count = int(np.sum(m))
             if count > best_count:
                 best_count = count
                 best_color = color_name

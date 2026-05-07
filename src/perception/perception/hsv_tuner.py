@@ -118,7 +118,24 @@ class LABTunerNode(Node):
         cv2.putText(masked, f'{px} px', (6, DISPLAY_H - 8),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
 
-        cv2.imshow(WINDOW, np.hstack([orig, mask_3c, masked]))
+        color_name = COLOR_KEYS[self.color_idx]
+        if color_name == 'red':
+            excl = np.zeros(lab.shape[:2], dtype=np.uint8)
+            for neighbor in ('orange', 'pink'):
+                for lo, hi in self.ranges[neighbor]:
+                    excl = cv2.bitwise_or(excl, cv2.inRange(lab, np.array(lo), np.array(hi)))
+            adj_mask   = cv2.bitwise_and(mask, cv2.bitwise_not(excl))
+            adj_masked = cv2.resize(cv2.bitwise_and(frame, frame, mask=adj_mask),
+                                    (DISPLAY_W, DISPLAY_H))
+            label(adj_masked, 'Red (excl. orange+pink)')
+            adj_px = int(np.sum(adj_mask > 0))
+            cv2.putText(adj_masked, f'{adj_px} px', (6, DISPLAY_H - 8),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
+            cv2.resizeWindow(WINDOW, DISPLAY_W * 4, DISPLAY_H)
+            cv2.imshow(WINDOW, np.hstack([orig, mask_3c, masked, adj_masked]))
+        else:
+            cv2.resizeWindow(WINDOW, DISPLAY_W * 3, DISPLAY_H)
+            cv2.imshow(WINDOW, np.hstack([orig, mask_3c, masked]))
 
         key = cv2.waitKey(1) & 0xFF
 
