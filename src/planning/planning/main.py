@@ -98,7 +98,7 @@ class UR7e_CubeGrasp(Node):
             print('[SCAN] FAIL — no joint state received yet', flush=True)
             return self._fail(response, 'no joint state')
         print(f'[SCAN] Joint state OK, calling IK...', flush=True)
-        ok = self._move_to(x, y, z, vel=0.2, accel=0.2)
+        ok = self._move_to(x, y, z, vel=0.05, accel=0.05)
         print(f'[SCAN] Move result: {ok}', flush=True)
         return self._result(response, ok, 'scan_pose')
 
@@ -158,7 +158,7 @@ class UR7e_CubeGrasp(Node):
         if joint_sol is None:
             return False
 
-        traj = self.ik_planner.plan_to_joints(joint_sol, vel, accel)
+        traj = self.ik_planner.plan_to_joints(joint_sol, vel, accel, start_joint_state=js)
         if traj is None:
             return False
 
