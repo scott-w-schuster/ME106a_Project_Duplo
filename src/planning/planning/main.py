@@ -73,6 +73,7 @@ class UR7e_CubeGrasp(Node):
         self.gripper_cli = self.create_client(Trigger, '/toggle_gripper', callback_group=cb)
 
         self.ik_planner = IKPlanner()
+        self._motion_lock = threading.Lock()
 
     # ── Subscriptions ─────────────────────────────────────────────────────────
 
@@ -146,6 +147,10 @@ class UR7e_CubeGrasp(Node):
     # ── Motion helpers ────────────────────────────────────────────────────────
 
     def _move_to(self, x, y, z, qx=0.0, qy=1.0, qz=0.0, qw=0.0) -> bool:
+        with self._motion_lock:
+            return self._move_to_locked(x, y, z, qx, qy, qz, qw)
+
+    def _move_to_locked(self, x, y, z, qx=0.0, qy=1.0, qz=0.0, qw=0.0) -> bool:
         with self._js_lock:
             js = self.joint_state
         if js is None:
