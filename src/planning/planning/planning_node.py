@@ -1,23 +1,33 @@
 import json
+import threading
+import time
 
+import numpy as np
+import requests
 import rclpy
 from rclpy.node import Node
+from rclpy.duration import Duration
 from rclpy.qos import QoSProfile, DurabilityPolicy
 
 from std_srvs.srv import Trigger
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import Pose, PoseArray, PoseStamped
+from std_msgs.msg import String
 from scipy.spatial.transform import Rotation as R
 
-STUD_PITCH_M   = 0.008   # 1 stud  = 8 mm
-BLOCK_HEIGHT_M = 0.0096  # 1 layer = 9.6 mm
-GRID_SIZE      = 20
-BLOCK_DIMS     = {'2x4': (2, 4), '2x2': (2, 2)}
+import tf2_ros
+import tf2_geometry_msgs
+
+STUD_PITCH_M = 0.016
+BLOCK_DIMS   = {'2x2': (2, 2), '2x4': (2, 4), '2x8': (2, 8)}
+BRICK_HEIGHTS = {'half': 0.0096, 'normal': 0.0192, 'tall': 0.0384}
+
+TF_TIMEOUT_SEC       = 1.0
+PICK_VERIFY_RADIUS_M = 0.05
 
 LATCH = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
 
 def block_rot_to_quat(rotation_deg: float):
-    """Gripper quaternion for a given block rotation (pointing down + yaw)."""
     q = R.from_euler('z', rotation_deg, degrees=True) * R.from_quat([0, 1, 0, 0])
     x, y, z, w = q.as_quat()
     return float(x), float(y), float(z), float(w)
@@ -34,22 +44,52 @@ class LEGOBuildPlanner(Node):
             self.build_sequence = json.load(f)
         self.get_logger().info(f'Loaded {len(self.build_sequence)} block(s)')
         self.current_step = 0
+        self._layer_base_z = self._compute_layer_heights()
 
-        # ── Pose publishers → main.py ─────────────────────────────────────────
+        self._lock            = threading.Lock()
+        self._latest_poses    = None
+        self._latest_meta     = None
+        self._last_pick_pose  = None
+        self._last_pick_color = None
+
         self.pick_pub  = self.create_publisher(PoseStamped, '/pick_pose',  LATCH)
         self.place_pub = self.create_publisher(PoseStamped, '/place_pose', LATCH)
 
-        # ── Service clients → main.py ─────────────────────────────────────────
         self.pregrasp_cli = self.create_client(Trigger, '/move_to_pregrasp')
         self.grasp_cli    = self.create_client(Trigger, '/grasp')
         self.check_cli    = self.create_client(Trigger, '/move_to_check')
         self.place_cli    = self.create_client(Trigger, '/preplace_and_place')
 
-        # Brief delay so main.py can finish starting up
+        self.create_subscription(PoseArray, '/detected_bricks',      self._on_bricks,      10)
+        self.create_subscription(String,    '/detected_bricks_meta', self._on_bricks_meta, 10)
+
+        self.tf_buffer   = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+
         self._started = False
         self.create_timer(3.0, self._start)
 
-    # ── Startup ───────────────────────────────────────────────────────────────
+    def _compute_layer_heights(self) -> dict:
+        layers = {}
+        for step in self.build_sequence:
+            idx = step.get('layer', 0)
+            layers.setdefault(idx, []).append(step)
+        base_z, result = 0.0, {}
+        for idx in sorted(layers):
+            result[idx] = base_z
+            base_z += max(
+                BRICK_HEIGHTS.get(s.get('height_type', 'normal'), BRICK_HEIGHTS['normal'])
+                for s in layers[idx]
+            )
+        return result
+
+    def _on_bricks(self, msg: PoseArray):
+        with self._lock:
+            self._latest_poses = msg
+
+    def _on_bricks_meta(self, msg: String):
+        with self._lock:
+            self._latest_meta = json.loads(msg.data)
 
     def _start(self):
         if self._started:
@@ -57,10 +97,24 @@ class LEGOBuildPlanner(Node):
         self._started = True
         for cli in (self.pregrasp_cli, self.grasp_cli, self.check_cli, self.place_cli):
             cli.wait_for_service()
-        self.get_logger().info('All services ready — starting build')
+        self.get_logger().info('All services ready — waiting for baseplate_frame...')
+        if not self._wait_for_baseplate(timeout_sec=30.0):
+            self.get_logger().error('Baseplate not detected after 30 s — aborting.')
+            return
         self._execute_step()
 
-    # ── Step entry point ──────────────────────────────────────────────────────
+    def _wait_for_baseplate(self, timeout_sec: float) -> bool:
+        deadline = time.time() + timeout_sec
+        while rclpy.ok() and time.time() < deadline:
+            try:
+                self.tf_buffer.lookup_transform(
+                    'base_link', 'baseplate_frame',
+                    rclpy.time.Time(), timeout=Duration(seconds=0.5))
+                self.get_logger().info('baseplate_frame detected.')
+                return True
+            except (tf2_ros.LookupException, tf2_ros.ExtrapolationException):
+                pass
+        return False
 
     def _execute_step(self):
         if self.current_step >= len(self.build_sequence):
@@ -70,45 +124,38 @@ class LEGOBuildPlanner(Node):
         step = self.build_sequence[self.current_step]
         self.get_logger().info(
             f'Step {self.current_step + 1}/{len(self.build_sequence)}: '
-            f'{step["color"]} {step["type"]} layer={step["layer"]} '
-            f'grid=({step["grid_x"]},{step["grid_z"]}) rot={step["rotation_deg"]}°')
+            f'{step["color"]} {step["type"]} layer={step.get("layer", 0)} '
+            f'grid=({step["grid_x"]},{step["grid_z"]}) rot={step["rotation_deg"]}°'
+        )
 
-        # Detection stubs
-        detected_bricks = self._detect_bricks()
-        plate_pose      = self._detect_plate()
-
-        if plate_pose is None:
-            self.get_logger().error('Build plate not detected — aborting')
-            return
-
-        pick_pose = self._find_brick(detected_bricks, step['type'], step['color'])
+        detected = self._detect_bricks()
+        pick_pose = self._find_brick(detected, step['type'], step['color'])
         if pick_pose is None:
             self.get_logger().error(f'No {step["color"]} {step["type"]} found — skipping')
             self.current_step += 1
             self._execute_step()
             return
 
-        # Bake gripper rotation into both poses so main.py can read it directly
-        qx, qy, qz, qw = block_rot_to_quat(step['rotation_deg'])
-        for pose in (pick_pose, self._grid_to_pose(step, plate_pose)):
-            pose.pose.orientation.x = qx
-            pose.pose.orientation.y = qy
-            pose.pose.orientation.z = qz
-            pose.pose.orientation.w = qw
+        place_pose = self._grid_to_pose(step)
+        if place_pose is None:
+            self.get_logger().error('Cannot compute placement pose — aborting step')
+            self.current_step += 1
+            self._execute_step()
+            return
 
-        place_pose = self._grid_to_pose(step, plate_pose)
-        place_pose.pose.orientation.x = qx
-        place_pose.pose.orientation.y = qy
-        place_pose.pose.orientation.z = qz
-        place_pose.pose.orientation.w = qw
+        qx, qy, qz, qw = block_rot_to_quat(step['rotation_deg'])
+        for ps in (pick_pose, place_pose):
+            ps.pose.orientation.x = qx
+            ps.pose.orientation.y = qy
+            ps.pose.orientation.z = qz
+            ps.pose.orientation.w = qw
+
+        self._last_pick_pose  = pick_pose
+        self._last_pick_color = step['color']
 
         self.pick_pub.publish(pick_pose)
         self.place_pub.publish(place_pose)
-
-        # Kick off the async service chain
         self.pregrasp_cli.call_async(Trigger.Request()).add_done_callback(self._on_pregrasp)
-
-    # ── Async service chain ───────────────────────────────────────────────────
 
     def _on_pregrasp(self, future):
         if not self._ok(future, 'pregrasp'):
@@ -135,32 +182,46 @@ class LEGOBuildPlanner(Node):
         self.current_step += 1
         self._execute_step()
 
-    # ── Detection stubs ───────────────────────────────────────────────────────
-
     def _detect_bricks(self) -> list:
-        """
-        STUB — call /detect_bricks service.
-        Should return list of dicts: {type, color, pose: PoseStamped}
-        """
-        self.get_logger().warn('STUB: _detect_bricks — returning []')
-        return []
-
-    def _detect_plate(self):
-        """
-        STUB — call /detect_build_plate service.
-        Should return PoseStamped of plate centre in base_link frame, or None.
-        """
-        self.get_logger().warn('STUB: _detect_plate — returning None')
-        return None
+        with self._lock:
+            poses = self._latest_poses
+            meta  = self._latest_meta
+        if poses is None or meta is None:
+            self.get_logger().warn('No brick detections received yet.')
+            return []
+        result = []
+        for pose, m in zip(poses.poses, meta):
+            rows, cols = m['shape']
+            brick_type = f'{min(rows, cols)}x{max(rows, cols)}'
+            if brick_type not in BLOCK_DIMS:
+                continue
+            ps = PoseStamped()
+            ps.header = poses.header
+            ps.pose   = pose
+            result.append({'type': brick_type, 'color': m['color'], 'pose': ps})
+        return result
 
     def _verify_pickup(self) -> bool:
-        """
-        STUB — read camera while arm is at check pose to confirm block is held.
-        """
-        self.get_logger().warn('STUB: _verify_pickup — assuming True')
+        time.sleep(0.3)
+        if self._last_pick_pose is None:
+            return True
+        with self._lock:
+            poses = self._latest_poses
+            meta  = self._latest_meta
+        if poses is None or meta is None:
+            return True
+        pick_xy = np.array([
+            self._last_pick_pose.pose.position.x,
+            self._last_pick_pose.pose.position.y,
+        ])
+        for pose, m in zip(poses.poses, meta):
+            if m.get('color') != self._last_pick_color:
+                continue
+            if np.linalg.norm(np.array([pose.position.x, pose.position.y]) - pick_xy) \
+                    < PICK_VERIFY_RADIUS_M:
+                self.get_logger().warn('Brick still detected at pick location.')
+                return False
         return True
-
-    # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _find_brick(self, detected: list, block_type: str, color: str):
         for b in detected:
@@ -168,23 +229,35 @@ class LEGOBuildPlanner(Node):
                 return b['pose']
         return None
 
-    def _grid_to_pose(self, step: dict, plate_pose: PoseStamped) -> PoseStamped:
-        """Convert grid position to world-frame PoseStamped using plate origin."""
+    def _grid_to_pose(self, step: dict) -> PoseStamped:
+        try:
+            tf_bp = self.tf_buffer.lookup_transform(
+                'base_link', 'baseplate_frame',
+                rclpy.time.Time(), timeout=Duration(seconds=TF_TIMEOUT_SEC))
+        except (tf2_ros.LookupException, tf2_ros.ExtrapolationException) as e:
+            self.get_logger().warn(f'baseplate_frame lookup failed: {e}')
+            return None
+
         w, d = BLOCK_DIMS[step['type']]
-        if step['rotation_deg'] % 180 != 0:
+        if int(step['rotation_deg']) % 180 == 90:
             w, d = d, w
 
-        x_off = (step['grid_x'] + (w - 1) / 2 - GRID_SIZE / 2 + 0.5) * STUD_PITCH_M
-        y_off = (step['grid_z'] + (d - 1) / 2 - GRID_SIZE / 2 + 0.5) * STUD_PITCH_M
-        z_off = step['layer'] * BLOCK_HEIGHT_M
+        layer       = step.get('layer', 0)
+        height_type = step.get('height_type', 'normal')
+        base_z      = self._layer_base_z.get(layer, 0.0)
+        brick_h     = BRICK_HEIGHTS.get(height_type, BRICK_HEIGHTS['normal'])
 
-        pose = PoseStamped()
-        pose.header.stamp    = self.get_clock().now().to_msg()
-        pose.header.frame_id = 'base_link'
-        pose.pose.position.x = plate_pose.pose.position.x + x_off
-        pose.pose.position.y = plate_pose.pose.position.y + y_off
-        pose.pose.position.z = plate_pose.pose.position.z + z_off
-        return pose
+        pose_bp = Pose()
+        pose_bp.position.x = (step['grid_x'] + (w - 1) / 2.0) * STUD_PITCH_M
+        pose_bp.position.y = (step['grid_z'] + (d - 1) / 2.0) * STUD_PITCH_M
+        pose_bp.position.z = base_z + brick_h
+        pose_bp.orientation.w = 1.0
+
+        ps = PoseStamped()
+        ps.header.stamp    = self.get_clock().now().to_msg()
+        ps.header.frame_id = 'base_link'
+        ps.pose            = tf2_geometry_msgs.do_transform_pose(pose_bp, tf_bp)
+        return ps
 
     def _ok(self, future, step_name: str) -> bool:
         try:

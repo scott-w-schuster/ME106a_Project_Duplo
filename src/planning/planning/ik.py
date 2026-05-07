@@ -8,62 +8,40 @@ from builtin_interfaces.msg import Duration
 import sys
 
 
-# Example usage:
-# -------------------------------------------------
-# current joint state (replace with your robot's)
-# current_state = JointState()
-# current_state.name = [
-#     'shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint',
-#     'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint'
-# ]
-# current_state.position = [0.0, -1.57, 1.57, 0.0, 0.0, 0.0]
-
-# Compute IK for target point
-# ik_solution = node.compute_ik(current_state, 0.4, 0.1, 0.3)
-
-# if ik_solution:
-#     # Plan motion to the found joint configuration
-#     trajectory = node.plan_to_joints(ik_solution)
-#     if trajectory:
-#         node.get_logger().info('Trajectory ready to execute.')
-
-
 class IKPlanner(Node):
     def __init__(self):
         super().__init__('ik_planner')
 
-        # ---- Clients ----
-        self.ik_client = self.create_client(GetPositionIK, '/compute_ik')
-        self.plan_client = self.create_client(GetMotionPlan, '/plan_kinematic_path')
+        self.declare_parameter('ee_link', 'tool0')
+        self._ee_link = self.get_parameter('ee_link').get_parameter_value().string_value
+
+        self.ik_client   = self.create_client(GetPositionIK,  '/compute_ik')
+        self.plan_client = self.create_client(GetMotionPlan,   '/plan_kinematic_path')
 
         for srv, name in [(self.ik_client, 'compute_ik'),
                           (self.plan_client, 'plan_kinematic_path')]:
             while not srv.wait_for_service(timeout_sec=1.0):
                 self.get_logger().info(f'Waiting for /{name} service...')
 
-    # -----------------------------------------------------------
-    # TODO: Compute IK for a given (x, y, z) + quat and current robot joint state
-    # -----------------------------------------------------------
     def compute_ik(self, current_joint_state, x, y, z,
-                   qx=0.0, qy=1.0, qz=0.0, qw=0.0): # Think about why the default quaternion is like this. Why is qy=1?
+                   qx=0.0, qy=1.0, qz=0.0, qw=0.0):
         pose = PoseStamped()
         pose.header.frame_id = 'base_link'
-        pose.pose.position.x = x # TODO: There are multiple parts/lines to fill here!
-        pose.pose.position.y =y
-        pose.pose.position.z =z
-        pose.pose.orientation.x =qx
-        pose.pose.orientation.y =qy
-        pose.pose.orientation.z =qz
-        pose.pose.orientation.w =qw
+        pose.pose.position.x    = x
+        pose.pose.position.y    = y
+        pose.pose.position.z    = z
+        pose.pose.orientation.x = qx
+        pose.pose.orientation.y = qy
+        pose.pose.orientation.z = qz
+        pose.pose.orientation.w = qw
 
         ik_req = GetPositionIK.Request()
-        # TODO: Lookup the format for ik request and build ik_req by filling in necessary parameters. What is your end-effector link name?
-        ik_req.ik_request.avoid_collisions = True
-        ik_req.ik_request.timeout = Duration(sec=5)
-        ik_req.ik_request.group_name = 'ur_manipulator'
-
+        ik_req.ik_request.group_name          = 'ur_manipulator'
+        ik_req.ik_request.ik_link_name        = self._ee_link
+        ik_req.ik_request.avoid_collisions    = True
+        ik_req.ik_request.timeout             = Duration(sec=5)
         ik_req.ik_request.robot_state.joint_state = current_joint_state
-        ik_req.ik_request.pose_stamped=pose
+        ik_req.ik_request.pose_stamped        = pose
         
 
         future = self.ik_client.call_async(ik_req)
@@ -81,10 +59,7 @@ class IKPlanner(Node):
         self.get_logger().info('IK solution found.')
         return result.solution.joint_state
 
-    # -----------------------------------------------------------
-    # Plan motion given a desired joint configuration
-    # -----------------------------------------------------------
-    def plan_to_joints(self, target_joint_state, velocity_scale = 0.1, accel_scale = 0.1):
+    def plan_to_joints(self, target_joint_state, velocity_scale=0.1, accel_scale=0.1):
         req = GetMotionPlan.Request()
         req.motion_plan_request.group_name = 'ur_manipulator'
         req.motion_plan_request.allowed_planning_time = 5.0

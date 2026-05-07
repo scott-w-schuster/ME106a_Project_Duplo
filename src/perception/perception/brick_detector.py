@@ -17,19 +17,20 @@ from visualization_msgs.msg import Marker, MarkerArray
 import tf2_ros
 import tf2_geometry_msgs
 from scipy.spatial.transform import Rotation
+from scipy.spatial import cKDTree
 
 COLOR_RANGES = {
-    'red':          [((  0, 154, 123), (151, 178, 169))],
-    'orange':       [((100, 133, 155), (230, 175, 210))],
-    'yellow':       [((122, 122, 140), (219, 157, 168))],
-    'light_green':  [(( 38,  73, 145), (150, 127, 173))],
-    'sky_blue':     [(( 60, 104,  53), (153, 137, 111))],
-    'mint':         [((121, 103, 124), (199, 129, 145))],
-    'white':        [((155, 121, 114), (215, 141, 140))],
-    'purple':       [(( 38, 125,  72), (175, 168, 118))],
-    'brown':        [(( 56, 133, 114), (154, 144, 147))],
-    'pink':         [(( 95, 168, 127), (238, 191, 148))],
-    'light_blue':   [((132, 105,  85), (255, 140, 130))],
+    'red':         [((40,  155, 138), (200, 200, 188))],
+    'orange':      [((100, 133, 155), (230, 175, 210))],
+    'yellow':      [((140, 112, 170), (255, 148, 228))],
+    'light_green': [((75,   72, 158), (220, 120, 225))],
+    'sky_blue':    [((40,  102,  52), (195, 145, 108))],
+    'mint':        [((128,  88,  88), (228, 128, 135))],
+    'white':       [((185, 115, 115), (255, 145, 145))],
+    'purple':      [((38,  125,  72), (175, 168, 118))],
+    'brown':       [((28,  122, 135), (132, 165, 182))],
+    'pink':        [((118, 145, 115), (238, 202, 158))],
+    'light_blue':  [((132, 105,  85), (255, 140, 130))],
 }
 
 
@@ -55,6 +56,11 @@ BASEPLATE_MIN_AREA_PX = 5000
 
 
 STUD_PITCH_M   = 0.016
+STUD_MIN_RADIUS_PX     = 5
+STUD_MAX_RADIUS_PX     = 20
+STUD_MIN_DIST_PX       = 15
+MAX_BRICK_FOOTPRINT_M2 = (2 * STUD_PITCH_M) * (8 * STUD_PITCH_M) * 2.0
+
 BASEPLATE_ROWS = 16
 BASEPLATE_COLS = 16
 
@@ -81,11 +87,11 @@ TABLE_MASK_MARGIN_M   = 0.006
 MAX_BRICK_HEIGHT_M    = 0.060   
 
 VOXEL_SIZE_M          = 0.004   
-DBSCAN_EPS_M          = 0.015   
+DBSCAN_EPS_M          = 0.012
 DBSCAN_MIN_PTS        = 10      
 
 
-COLOR_MATCH_MIN_FRAC  = 0.25
+COLOR_MATCH_MIN_FRAC  = 0.40
 
 TF_TIMEOUT_SEC = 1.0
 
@@ -95,7 +101,7 @@ GROUND_PLANE_REFIT_SECS = 2.0
 
 
 EMA_ALPHA         = 0.35
-TRACK_MAX_STALE   = 5
+TRACK_MAX_STALE   = 3
 TRACK_MATCH_DIST_M = 0.025   
 
 
@@ -147,10 +153,27 @@ class BrickDetectorNode(Node):
 
         self.declare_parameter('camera_frame', 'camera_depth_optical_frame')
 
+        self._frame_validated = False
         self.create_timer(0.2, self.process)
+        self.create_timer(2.0, self._validate_camera_frame)
         self.get_logger().info('BrickDetectorNode initialized.')
 
 
+
+    def _validate_camera_frame(self):
+        if self._frame_validated:
+            return
+        camera_frame = self.get_parameter('camera_frame').get_parameter_value().string_value
+        try:
+            self.tf_buffer.lookup_transform('base_link', camera_frame, rclpy.time.Time())
+            self.get_logger().info(f"Camera frame '{camera_frame}' validated OK.")
+            self._frame_validated = True
+        except (tf2_ros.LookupException, tf2_ros.ExtrapolationException):
+            self.get_logger().warn(
+                f"Camera frame '{camera_frame}' not found in TF tree. "
+                f"Common values: camera_color_optical_frame, camera_depth_optical_frame.",
+                throttle_duration_sec=5.0
+            )
 
     def camera_info_callback(self, msg: CameraInfo):
         self.fx = msg.k[0];  self.fy = msg.k[4]
@@ -347,7 +370,95 @@ class BrickDetectorNode(Node):
                 continue
             mask = labels == label
             clusters.append((pts_down[mask], colors_down[mask]))
-        return clusters
+
+        result = []
+        for pts_c, col_c in clusters:
+            if self._cluster_footprint_m2(pts_c) > MAX_BRICK_FOOTPRINT_M2:
+                self.get_logger().debug('Oversized cluster detected — attempting depth split.')
+                result.extend(self._split_large_cluster(pts_c, col_c))
+            else:
+                result.append((pts_c, col_c))
+        return result
+
+    def _cluster_footprint_m2(self, pts: np.ndarray) -> float:
+        if self.ground_plane is None or len(pts) < 3:
+            return 0.0
+        normal, _ = self.ground_plane
+        ref = (np.array([1.0, 0.0, 0.0]) if abs(normal[0]) < 0.9
+               else np.array([0.0, 1.0, 0.0]))
+        v1 = np.cross(normal, ref);  v1 /= np.linalg.norm(v1)
+        v2 = np.cross(normal, v1);   v2 /= np.linalg.norm(v2)
+        proj = np.column_stack([pts @ v1, pts @ v2]).astype(np.float32)
+        hull = cv2.convexHull(proj.reshape(-1, 1, 2))
+        return float(cv2.contourArea(hull))
+
+    def _find_depth_seam(self, pts: np.ndarray):
+        if self.ground_plane is None or len(pts) < MIN_CLUSTER_PTS * 2:
+            return None
+
+        normal, _ = self.ground_plane
+        ref = (np.array([1.0, 0.0, 0.0]) if abs(normal[0]) < 0.9
+               else np.array([0.0, 1.0, 0.0]))
+        v1 = np.cross(normal, ref);  v1 /= np.linalg.norm(v1)
+        v2 = np.cross(normal, v1);   v2 /= np.linalg.norm(v2)
+
+        proj_2d  = np.column_stack([pts @ v1, pts @ v2])
+        centered = proj_2d - proj_2d.mean(axis=0)
+        _, _, Vt = np.linalg.svd(centered, full_matrices=False)
+        long_2d  = Vt[0]
+
+        long_3d  = long_2d[0] * v1 + long_2d[1] * v2
+        long_3d /= np.linalg.norm(long_3d)
+
+        proj_1d = pts @ long_3d
+        lo, hi  = proj_1d.min(), proj_1d.max()
+        span    = hi - lo
+
+        if span < STUD_PITCH_M * 3:
+            return None
+
+        n_bins = max(12, int(span / (STUD_PITCH_M * 0.4)))
+        counts, bin_edges = np.histogram(proj_1d, bins=n_bins)
+        bin_centers       = (bin_edges[:-1] + bin_edges[1:]) / 2
+        smooth            = np.convolve(counts.astype(float), np.ones(3) / 3, mode='same')
+
+        margin = n_bins // 3
+        search = smooth[margin: n_bins - margin]
+        if len(search) == 0:
+            return None
+        min_idx = margin + int(np.argmin(search))
+
+        left_peak  = smooth[:min_idx].max() if min_idx > 0 else 0
+        right_peak = smooth[min_idx + 1:].max() if min_idx < len(smooth) - 1 else 0
+        avg_peak   = (left_peak + right_peak) / 2
+        if avg_peak < 1 or smooth[min_idx] > avg_peak * 0.6:
+            return None
+
+        return long_3d, float(bin_centers[min_idx])
+
+    def _split_large_cluster(self, pts: np.ndarray, colors: np.ndarray) -> list:
+        seam = self._find_depth_seam(pts)
+        if seam is not None:
+            long_3d, split_val = seam
+            side_a = (pts @ long_3d) <= split_val
+            if side_a.sum() >= MIN_CLUSTER_PTS and (~side_a).sum() >= MIN_CLUSTER_PTS:
+                self.get_logger().debug('Depth seam split successful.')
+                return [(pts[side_a], colors[side_a]), (pts[~side_a], colors[~side_a])]
+
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(pts)
+        labels = np.array(pcd.cluster_dbscan(
+            eps=DBSCAN_EPS_M * 0.6,
+            min_points=max(3, DBSCAN_MIN_PTS // 2),
+            print_progress=False,
+        ))
+        sub = []
+        for lbl in np.unique(labels):
+            if lbl < 0:
+                continue
+            m = labels == lbl
+            sub.append((pts[m], colors[m]))
+        return sub if len(sub) > 1 else [(pts, colors)]
 
     def _classify_cluster_color(self, cluster_bgr: np.ndarray):
 
@@ -388,23 +499,30 @@ class BrickDetectorNode(Node):
         return best_color
 
     def _shape_and_orientation_from_cluster(self, cluster_pts: np.ndarray) -> tuple:
-        
         if self.ground_plane is None or len(cluster_pts) < MIN_CLUSTER_PTS:
             return 1, 1, 0.0
 
+        if self.latest_rgb is not None and self.fx is not None:
+            result = self._shape_from_studs(cluster_pts)
+            if result is not None:
+                return result
+
+        return self._shape_from_pointcloud_extent(cluster_pts)
+
+    def _shape_from_pointcloud_extent(self, cluster_pts: np.ndarray) -> tuple:
         normal, _ = self.ground_plane
         ref = (np.array([1.0, 0.0, 0.0]) if abs(normal[0]) < 0.9
                else np.array([0.0, 1.0, 0.0]))
-        v1  = np.cross(normal, ref);  v1 /= np.linalg.norm(v1)
-        v2  = np.cross(normal, v1);   v2 /= np.linalg.norm(v2)
+        v1 = np.cross(normal, ref);  v1 /= np.linalg.norm(v1)
+        v2 = np.cross(normal, v1);   v2 /= np.linalg.norm(v2)
 
         proj     = np.column_stack([cluster_pts @ v1, cluster_pts @ v2])
         centered = proj - proj.mean(axis=0)
         _, _, Vt = np.linalg.svd(centered, full_matrices=False)
         proj_pca = centered @ Vt.T
 
-        long_m  = float(proj_pca[:, 0].max() - proj_pca[:, 0].min())
-        short_m = float(proj_pca[:, 1].max() - proj_pca[:, 1].min())
+        long_m  = float(np.percentile(proj_pca[:, 0], 95) - np.percentile(proj_pca[:, 0], 5))
+        short_m = float(np.percentile(proj_pca[:, 1], 95) - np.percentile(proj_pca[:, 1], 5))
 
         cols = max(1, min(8, round(long_m  / STUD_PITCH_M)))
         rows = max(1, min(4, round(short_m / STUD_PITCH_M)))
@@ -412,6 +530,82 @@ class BrickDetectorNode(Node):
         long_3d   = Vt[0, 0] * v1 + Vt[0, 1] * v2
         angle_deg = float(np.degrees(np.arctan2(long_3d[1], long_3d[0])))
         return rows, cols, angle_deg
+
+    def _shape_from_studs(self, cluster_pts: np.ndarray):
+        Z_vals = cluster_pts[:, 2]
+        valid  = Z_vals > 0
+        if not np.any(valid):
+            return None
+        pts = cluster_pts[valid]
+        u = (pts[:, 0] / pts[:, 2] * self.fx + self.cx).astype(np.int32)
+        v = (pts[:, 1] / pts[:, 2] * self.fy + self.cy).astype(np.int32)
+
+        H, W = self.latest_rgb.shape[:2]
+        in_img = (u >= 0) & (u < W) & (v >= 0) & (v < H)
+        if not np.any(in_img):
+            return None
+
+        u_in, v_in = u[in_img], v[in_img]
+        u_min, u_max = int(u_in.min()), int(u_in.max())
+        v_min, v_max = int(v_in.min()), int(v_in.max())
+        if (u_max - u_min) < 10 or (v_max - v_min) < 10:
+            return None
+
+        mask = np.zeros((H, W), dtype=np.uint8)
+        mask[v_in, u_in] = 255
+        k    = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        mask = cv2.dilate(mask, k)
+
+        roi_bgr  = self.latest_rgb[v_min:v_max + 1, u_min:u_max + 1]
+        roi_mask = mask[v_min:v_max + 1, u_min:u_max + 1]
+        gray     = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
+        gray     = cv2.bitwise_and(gray, gray, mask=roi_mask)
+        blurred  = cv2.GaussianBlur(gray, (5, 5), 1.5)
+
+        circles = cv2.HoughCircles(
+            blurred, cv2.HOUGH_GRADIENT,
+            dp=1, minDist=STUD_MIN_DIST_PX,
+            param1=50, param2=18,
+            minRadius=STUD_MIN_RADIUS_PX, maxRadius=STUD_MAX_RADIUS_PX,
+        )
+        if circles is None or len(circles[0]) < 2:
+            return None
+
+        centers = np.round(circles[0, :, :2]).astype(float)
+
+        tree     = cKDTree(centers)
+        dists, _ = tree.query(centers, k=min(2, len(centers)))
+        if dists.ndim == 1 or dists.shape[1] < 2:
+            return None
+        pitch_px = float(np.median(dists[:, 1]))
+        if pitch_px < 3:
+            return None
+
+        centered_c = centers - centers.mean(axis=0)
+        _, _, Vt   = np.linalg.svd(centered_c, full_matrices=False)
+        proj_pca   = centered_c @ Vt.T
+        long_span  = proj_pca[:, 0].max() - proj_pca[:, 0].min()
+        short_span = proj_pca[:, 1].max() - proj_pca[:, 1].min()
+
+        cols = max(1, min(8, round(long_span  / pitch_px) + 1))
+        rows = max(1, min(4, round(short_span / pitch_px) + 1))
+
+        angle_deg = self._angle_from_pca_3d(cluster_pts)
+        return rows, cols, angle_deg
+
+    def _angle_from_pca_3d(self, cluster_pts: np.ndarray) -> float:
+        if self.ground_plane is None:
+            return 0.0
+        normal, _ = self.ground_plane
+        ref = (np.array([1.0, 0.0, 0.0]) if abs(normal[0]) < 0.9
+               else np.array([0.0, 1.0, 0.0]))
+        v1 = np.cross(normal, ref);  v1 /= np.linalg.norm(v1)
+        v2 = np.cross(normal, v1);   v2 /= np.linalg.norm(v2)
+        proj     = np.column_stack([cluster_pts @ v1, cluster_pts @ v2])
+        centered = proj - proj.mean(axis=0)
+        _, _, Vt = np.linalg.svd(centered, full_matrices=False)
+        long_3d  = Vt[0, 0] * v1 + Vt[0, 1] * v2
+        return float(np.degrees(np.arctan2(long_3d[1], long_3d[0])))
 
     def _draw_cluster_debug(self, debug: np.ndarray, cluster_pts: np.ndarray,
                              color_name: str, shape: tuple,
@@ -566,7 +760,11 @@ class BrickDetectorNode(Node):
                 rclpy.time.Time(), timeout=Duration(seconds=0.1))
             return tf2_geometry_msgs.do_transform_pose(pose_bp, tf_to_base)
         except (tf2_ros.LookupException, tf2_ros.ExtrapolationException):
-            return pose_base   
+            self.get_logger().warn(
+                'Grid snapping unavailable — baseplate_frame not found. Publishing unsnapped pose.',
+                throttle_duration_sec=5.0
+            )
+            return pose_base
 
     def publish_poses(self, bricks: list) -> list:
        
