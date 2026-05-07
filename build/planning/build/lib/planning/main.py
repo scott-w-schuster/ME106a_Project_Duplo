@@ -15,19 +15,30 @@ from sensor_msgs.msg import JointState
 from planning.ik import IKPlanner
 
 # Arm moves to this pose after grasping so the planning node can verify pickup
-CHECK_X = 0.3   # TODO: set for your robot workspace
-CHECK_Y = 0.0
-CHECK_Z = 0.5
+CHECK_X = 0.095
+CHECK_Y = 0.418
+CHECK_Z = 0.188
 
 LATCH = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+
+SCAN_POSES = [
+   (0.095,  0.408, 0.288),
+   (0.195,  0.408, 0.288),
+   (0.295,  0.408, 0.288),
+   (-0.095,  0.408, 0.288),
+   (-0.195,  0.408, 0.288),
+   (-0.295,  0.408, 0.288),
+   (-0.395,  0.408, 0.288),
+]
+
 
 
 class UR7e_CubeGrasp(Node):
 
     PRE_GRASP_OFFSET = 0.185
-    GRASP_OFFSET     = 0.05
+    GRASP_OFFSET     = 0.103
     PRE_PLACE_OFFSET = 0.185
-    PLACE_OFFSET     = 0.02
+    PLACE_OFFSET     = 0.1025
 
     def __init__(self):
         super().__init__('cube_grasp')
@@ -46,10 +57,12 @@ class UR7e_CubeGrasp(Node):
         self.create_subscription(JointState, '/joint_states', self._on_joint_state, 1, callback_group=cb)
 
         # ── Service servers (planning node calls these in order) ──────────────
+        self._scan_idx = 0
         self.create_service(Trigger, '/move_to_pregrasp',     self._handle_pregrasp,   callback_group=cb)
         self.create_service(Trigger, '/grasp',                self._handle_grasp,      callback_group=cb)
         self.create_service(Trigger, '/move_to_check',        self._handle_check,      callback_group=cb)
         self.create_service(Trigger, '/preplace_and_place',   self._handle_place,      callback_group=cb)
+        self.create_service(Trigger, '/next_scan_pose',       self._handle_scan_pose,  callback_group=cb)
 
         # ── Hardware ──────────────────────────────────────────────────────────
         self.exec_ac = ActionClient(
@@ -75,6 +88,20 @@ class UR7e_CubeGrasp(Node):
 
     # ── Service handlers (block until motion complete) ────────────────────────
 
+    def _handle_scan_pose(self, _request, response):
+        x, y, z = SCAN_POSES[self._scan_idx % len(SCAN_POSES)]
+        self._scan_idx += 1
+        print(f'[SCAN] Moving to ({x:.3f}, {y:.3f}, {z:.3f})', flush=True)
+        with self._js_lock:
+            js = self.joint_state
+        if js is None:
+            print('[SCAN] FAIL — no joint state received yet', flush=True)
+            return self._fail(response, 'no joint state')
+        print(f'[SCAN] Joint state OK, calling IK...', flush=True)
+        ok = self._move_to(x, y, z, vel=0.05, accel=0.05)
+        print(f'[SCAN] Move result: {ok}', flush=True)
+        return self._result(response, ok, 'scan_pose')
+
     def _handle_pregrasp(self, _request, response):
         if self.pick_pose is None:
             return self._fail(response, 'No pick pose received')
@@ -90,8 +117,9 @@ class UR7e_CubeGrasp(Node):
         p = self.pick_pose.pose
         ox, oy, oz, ow = p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w
 
-        ok = (self._move_to(p.position.x, p.position.y, p.position.z + self.GRASP_OFFSET,
-                            ox, oy, oz, ow, vel=0.07, accel=0.05)
+        ok = (self._toggle_gripper()
+              and self._move_to(p.position.x, p.position.y, p.position.z + self.GRASP_OFFSET,
+                                ox, oy, oz, ow, vel=0.05, accel=0.05)
               and self._toggle_gripper()
               and self._move_to(p.position.x, p.position.y, p.position.z + self.PRE_GRASP_OFFSET,
                                 ox, oy, oz, ow, vel=0.1, accel=0.1))
@@ -130,7 +158,7 @@ class UR7e_CubeGrasp(Node):
         if joint_sol is None:
             return False
 
-        traj = self.ik_planner.plan_to_joints(joint_sol, vel, accel)
+        traj = self.ik_planner.plan_to_joints(joint_sol, vel, accel, start_joint_state=js)
         if traj is None:
             return False
 

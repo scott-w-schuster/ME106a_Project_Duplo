@@ -1,68 +1,103 @@
-import argparse
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, RegisterEventHandler, EmitEvent
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.event_handlers import OnProcessExit
+from launch.events import Shutdown
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
+from ament_index_python.packages import get_package_share_directory
 import os
-from pathlib import Path
-import sys
-
-dir_path = os.path.dirname(os.path.realpath(__file__))
-sys.path.append(dir_path)
-
-from camera_config import CameraConfig, USB_CAM_DIR  # noqa: E402
-from launch import LaunchDescription  # noqa: E402
-from launch.actions import ExecuteProcess, GroupAction  # noqa: E402
-from launch_ros.actions import Node  # noqa: E402
-from ament_index_python.packages import get_package_share_directory  # noqa: E402
-
-CAMERAS = []
-CAMERAS.append(
-    CameraConfig(
-        name='camera1',
-        param_path=Path(USB_CAM_DIR, 'config', 'params.yaml')
-    )
-)
 
 def generate_launch_description():
-    rviz_config_dir = os.path.join(
-        get_package_share_directory('planning'), 
+    rviz_config = os.path.join(
+        get_package_share_directory('planning'),
+        'planning',
         'duplo_config.rviz'
     )
 
-    return LaunchDescription([  
-        ExecuteProcess(
-            cmd=['ros2', 'launch', 'realsense2_camera', 'rs_launch.py',
-                 'pointcloud.enable:=true', 'rgb_camera.color_profile:=1920x1080x30']
+    ur_type = LaunchConfiguration("ur_type", default="ur7e")
+    launch_rviz = LaunchConfiguration("launch_rviz", default="false") # make false if you don't want rviz to launch when launching moveit
+
+   
+    realsense_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(
+                get_package_share_directory('realsense2_camera'),
+                'launch',
+                'rs_launch.py'
+            )
         ),
-        ExecuteProcess(
-            cmd=['ros2', 'run', 'ur7e_utils', 'enable_comms']  
-        ),
-        ExecuteProcess(
-            cmd=['ros2', 'run', 'ur7e_utils', 'tuck']  
-        ),
-        Node(
+        launch_arguments={
+            'pointcloud.enable': 'true',
+            'rgb_camera.color_profile': '1920x1080x30',
+        }.items(),
+    )
+
+    # MoveIt include
+    moveit_launch_file = os.path.join(
+        get_package_share_directory("ur_moveit_config"),
+        "launch",
+        "ur_moveit.launch.py"
+    )
+    moveit_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(moveit_launch_file),
+        launch_arguments={
+            "ur_type": ur_type,
+            "launch_rviz": launch_rviz
+        }.items(),
+    )
+
+    ik_planner_node = Node(
+        package='planning',
+        executable='ik',
+        name='ik',
+        output='screen'
+    )
+
+    camera_transformn_node=Node(
             package='perception',
-            executable='static_tf_transform.py'
+            executable='camera_transform',
         ),
-        Node(
-            package='perception',
-            executable='brick_detector',
-            output='screen',
-            name='Brick_detection_node'
-        ),
-        Node(
-            package='planning',
-            executable='main',
-            output='screen'
-        ),
-        Node(
-            package='planning',
-            executable='ik'
-        ),
-        Node(
-            package='planning',
-            executable='planning_node'
-        ),
+    brick_detection_node=Node(
+        package='perception',
+        executable='brick_detector',
+        output='screen',
+        name='brick_detection_node',
+    ),
+    planning_main_node=Node(
+        package='planning',
+        executable='main',
+        output='screen',
+    ),
+    planning_node_node=Node(
+        package='planning',
+        executable='planning_node',
+        output='screen',
+    ),
+    
+
+    shutdown_on_any_exit = RegisterEventHandler(
+        OnProcessExit(
+            on_exit=[EmitEvent(event=Shutdown(reason='A launched process exited'))]
+        )
+    )
+
+    return LaunchDescription([
+
+        # Actions
+        realsense_launch,
+        moveit_launch,
+        ik_planner_node,
+        camera_transformn_node,
+        planning_main_node,
+        brick_detection_node,
+        planning_node_node,
+
         ExecuteProcess(
-            cmd=['rviz2', '-d', rviz_config_dir],output='screen'
+        cmd=['rviz2', '-d', rviz_config],
+        output='screen',
         ),
+
+        # Global handler (keep at end)
+        shutdown_on_any_exit,
     ])
-
-

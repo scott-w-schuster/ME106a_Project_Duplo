@@ -1,0 +1,5 @@
+  File "/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/planning/lib/python3.10/site-packages/launch/duplo.launch.py", line 96
+    brick_detection_node
+    ^^^^^^^^^^^^^^^^^^
+SyntaxError: invalid syntax. Perhaps you forgot a comma?
+

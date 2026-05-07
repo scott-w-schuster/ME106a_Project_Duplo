@@ -827,7 +827,7 @@ class BrickDetectorNode(Node):
         pose_cam.orientation.x, pose_cam.orientation.y = q[0], q[1]
         pose_cam.orientation.z, pose_cam.orientation.w = q[2], q[3]
 
-        for frame in ('camera_color_optical_frame',
+        for frame in ('camera_color_depth_frame',
                       self.get_parameter('camera_frame').get_parameter_value().string_value):
             try:
                 tf = self.tf_buffer.lookup_transform(
