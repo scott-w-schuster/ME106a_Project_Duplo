@@ -115,6 +115,9 @@ class LEGOBuildPlanner(Node):
         if self._started:
             return
         self._started = True
+        threading.Thread(target=self._start_worker, daemon=True).start()
+
+    def _start_worker(self):
         for cli in (self.pregrasp_cli, self.grasp_cli, self.check_cli, self.place_cli):
             cli.wait_for_service()
         self.get_logger().info('All services ready — waiting for baseplate_frame...')
