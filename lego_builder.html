@@ -908,63 +908,65 @@ resize();
 
 // ── EXPORT ────────────────────────────────────────────────────────────────────
 document.getElementById('btn-export').addEventListener('click', () => {
-  if (placed.length === 0) { setStatus('Nothing to export yet'); return; }
-
-  const sorted = [...placed].sort((a, b) => a.ly - b.ly || a.gz - b.gz || a.gx - b.gx);
-
-  let maxX = 0, maxZ = 0, maxLy = 0;
-  for (const b of placed) {
-    const { w, d } = dims(b.type, b.rot);
-    maxX  = Math.max(maxX,  b.gx + w);
-    maxZ  = Math.max(maxZ,  b.gz + d);
-    maxLy = Math.max(maxLy, b.ly + 1);
+  if (placed.length === 0) {
+    setStatus('Nothing to export!');
+    return;
   }
 
-  const byType = k => placed.filter(b => `${b.color}-${b.type}` === k).length;
+  // 1. Sort the blocks based on our Top-Layer First strategy
+  const sortedBlocks = [...placed].sort((a, b) => {
+    const aTop = a.ly + a.h; 
+    const bTop = b.ly + b.h;
 
+    // Primary Sort: Lowest top-reaching layer goes first
+    if (aTop !== bTop) return aTop - bTop;
+
+    // Secondary Sort: If top layers match, build from the bottom up
+    if (a.ly !== b.ly) return a.ly - b.ly;
+
+    // Tertiary Sort: Predictable grid sweeping
+    if (a.gz !== b.gz) return a.gz - b.gz;
+    return a.gx - b.gx;
+  });
+
+  const maxLy = Math.max(...placed.map(b => b.ly));
+  
   const plan = {
     metadata: {
-      created_at: new Date().toISOString(),
-      tool: 'LEGO Builder – Robot Arm Planner',
-      coordinate_system: 'right_handed_y_up',
-      units: { xy_studs: 1.0, height: VU, description: '1 world unit = 1 LEGO stud pitch' },
-      grid_origin: 'center of build plate',
-      grid_size: GRID
-    },
-    build_stats: {
+      timestamp: new Date().toISOString(),
       total_blocks: placed.length,
-      layers: maxLy,
-      dimensions_studs: { x: maxX, z: maxZ, height: maxLy },
-      remaining_inventory: { ...inventory },
-      blocks_used: {
-        'blue-2x4': byType('blue-2x4'), 'blue-2x2': byType('blue-2x2'),
-        'yellow-2x4': byType('yellow-2x4'), 'yellow-2x2': byType('yellow-2x2')
-      }
+      layers: maxLy + 1,
+      sorting_strategy: "top_layer_first"
     },
-    build_sequence: sorted.map((b, i) => {
+    // 2. Map the sorted array into the payload
+    sequence: sortedBlocks.map((b, i) => {
+      
+      // FIX 1: Run type and rotation through the dims() helper to get correct width/depth
       const { w, d } = dims(b.type, b.rot);
-      const wx = parseFloat((gW(b.gx) + (w - 1) / 2).toFixed(4));
-      const wy = parseFloat((b.ly * VU + VU / 2).toFixed(4));
-      const wz = parseFloat((gW(b.gz) + (d - 1) / 2).toFixed(4));
+      
+      // FIX 2: Generate a true 3D array of occupied cells based on block height
+      const occupied_3d = [];
+      for (let h_offset = 0; h_offset < b.h; h_offset++) {
+        b.cells.forEach(([x, z]) => {
+          occupied_3d.push({ grid_x: x, grid_y: b.ly + h_offset, grid_z: z });
+        });
+      }
+
       return {
         step: i + 1,
-        block_id: b.id,
-        type: b.type,
+        block_type: b.type,
         color: b.color,
-        layer: b.ly,
-        grid_x: b.gx,
-        grid_z: b.gz,
+        grid_position: { x: b.gx, y: b.ly, z: b.gz },
         rotation_deg: b.rot * 90,
-        world_position: { x: wx, y: wy, z: wz },
-        world_footprint: {
-          x_min: parseFloat((gW(b.gx) - 0.5).toFixed(4)),
-          x_max: parseFloat((gW(b.gx) + w - 0.5).toFixed(4)),
-          y_bottom: parseFloat((b.ly * VU).toFixed(4)),
-          y_top: parseFloat(((b.ly + 1) * VU).toFixed(4)),
-          z_min: parseFloat((gW(b.gz) - 0.5).toFixed(4)),
-          z_max: parseFloat((gW(b.gz) + d - 0.5).toFixed(4))
-        },
-        occupied_cells: b.cells.map(([x, z]) => ({ grid_x: x, grid_z: z }))
+        // world_bounds: {
+        //   x_min: parseFloat((gW(b.gx) - 0.5).toFixed(4)),
+        //   x_max: parseFloat((gW(b.gx) + w - 0.5).toFixed(4)), // Now uses resolved 'w'
+        //   y_bottom: parseFloat((b.ly * VU).toFixed(4)),
+        //   y_top: parseFloat(((b.ly + b.h) * VU).toFixed(4)), 
+        //   z_min: parseFloat((gW(b.gz) - 0.5).toFixed(4)),
+        //   z_max: parseFloat((gW(b.gz) + d - 0.5).toFixed(4))  // Now uses resolved 'd'
+        // },
+        occupied_cells: occupied_3d // Now includes grid_y!
       };
     })
   };
@@ -972,12 +974,11 @@ document.getElementById('btn-export').addEventListener('click', () => {
   const blob = new Blob([JSON.stringify(plan, null, 2)], { type: 'application/json' });
   const url  = URL.createObjectURL(blob);
   const a    = document.createElement('a');
-  a.href = url; a.download = `lego_build_${Date.now()}.json`;
+  a.href = url; a.download = `lego_build_plan_${Date.now()}.json`;
   a.click();
   URL.revokeObjectURL(url);
-  setStatus(`Exported ${placed.length} block(s) in ${maxLy} layer(s)`);
+  setStatus(`Exported ${placed.length} block(s) using Top-Layer slicing.`);
 });
-
 // ── RESET ─────────────────────────────────────────────────────────────────────
 document.getElementById('btn-reset').addEventListener('click', () => {
   if (!confirm('Reset the build and return all blocks to inventory?')) return;
