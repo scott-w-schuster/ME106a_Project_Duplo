@@ -169,7 +169,7 @@ class UR7e_CubeGrasp(Node):
         if joint_sol is None:
             return False
 
-        traj = self.ik_planner.plan_to_joints(joint_sol, vel, accel, start_joint_state=js)
+        traj = self.ik_planner.plan_to_joints(joint_sol, start_joint_state=js)
         if traj is None:
             return False
 
