@@ -228,7 +228,6 @@ def main(args=None):
     node = UR7e_CubeGrasp()
     executor = MultiThreadedExecutor()
     executor.add_node(node)
-    executor.add_node(node.ik_planner)  # so IKPlanner futures get processed
     try:
         executor.spin()
     finally:
