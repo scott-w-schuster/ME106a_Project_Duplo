@@ -144,19 +144,35 @@ class LEGOBuildPlanner(Node):
         self._execute_step()
 
     def _scan_workspace(self) -> bool:
-        for _ in range(12):
+        for i in range(12):
+            self.get_logger().info(f'Scan pose {i + 1}/12 — moving arm...')
             done = threading.Event()
-            self.scan_cli.call_async(Trigger.Request()).add_done_callback(lambda _: done.set())
-            done.wait(timeout=15.0)
-            time.sleep(0.8)
+            resp = [None]
+
+            def _cb(future, _r=resp, _d=done):
+                try:
+                    _r[0] = future.result()
+                except Exception as e:
+                    self.get_logger().error(f'Scan service error: {e}')
+                _d.set()
+
+            self.scan_cli.call_async(Trigger.Request()).add_done_callback(_cb)
+            if not done.wait(timeout=20.0):
+                self.get_logger().warn(f'Scan pose {i + 1} timed out')
+            elif resp[0] is not None and not resp[0].success:
+                self.get_logger().warn(
+                    f'Scan pose {i + 1} failed: {resp[0].message} '
+                    f'(IK or controller issue)')
+
+            time.sleep(1.0)
             try:
                 self.tf_buffer.lookup_transform(
                     'base_link', 'baseplate_frame',
-                    rclpy.time.Time(), timeout=Duration(seconds=0.2))
+                    rclpy.time.Time(), timeout=Duration(seconds=0.3))
                 self.get_logger().info('Baseplate found during scan.')
                 return True
             except (tf2_ros.LookupException, tf2_ros.ExtrapolationException):
-                self.get_logger().info(f'Baseplate not yet visible — continuing scan...')
+                self.get_logger().info('Baseplate not yet visible — continuing scan...')
         return self._wait_for_baseplate(timeout_sec=10.0)
 
     def _wait_for_baseplate(self, timeout_sec: float) -> bool:
