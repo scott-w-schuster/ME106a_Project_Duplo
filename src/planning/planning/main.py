@@ -21,6 +21,15 @@ CHECK_Z = 0.188
 
 LATCH = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
+SCAN_POSES = [
+    (0.30,  0.00, 0.55),
+    (0.30,  0.25, 0.55),
+    (0.30, -0.25, 0.55),
+    (0.45,  0.00, 0.55),
+    (0.45,  0.25, 0.55),
+    (0.45, -0.25, 0.55),
+]
+
 
 class UR7e_CubeGrasp(Node):
 
@@ -46,10 +55,12 @@ class UR7e_CubeGrasp(Node):
         self.create_subscription(JointState, '/joint_states', self._on_joint_state, 1, callback_group=cb)
 
         # ── Service servers (planning node calls these in order) ──────────────
+        self._scan_idx = 0
         self.create_service(Trigger, '/move_to_pregrasp',     self._handle_pregrasp,   callback_group=cb)
         self.create_service(Trigger, '/grasp',                self._handle_grasp,      callback_group=cb)
         self.create_service(Trigger, '/move_to_check',        self._handle_check,      callback_group=cb)
         self.create_service(Trigger, '/preplace_and_place',   self._handle_place,      callback_group=cb)
+        self.create_service(Trigger, '/next_scan_pose',       self._handle_scan_pose,  callback_group=cb)
 
         # ── Hardware ──────────────────────────────────────────────────────────
         self.exec_ac = ActionClient(
@@ -74,6 +85,12 @@ class UR7e_CubeGrasp(Node):
             self.joint_state = msg
 
     # ── Service handlers (block until motion complete) ────────────────────────
+
+    def _handle_scan_pose(self, _request, response):
+        x, y, z = SCAN_POSES[self._scan_idx % len(SCAN_POSES)]
+        self._scan_idx += 1
+        ok = self._move_to(x, y, z, vel=0.2, accel=0.2)
+        return self._result(response, ok, 'scan_pose')
 
     def _handle_pregrasp(self, _request, response):
         if self.pick_pose is None:

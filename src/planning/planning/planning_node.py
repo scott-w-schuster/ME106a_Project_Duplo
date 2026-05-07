@@ -70,6 +70,7 @@ class LEGOBuildPlanner(Node):
         self.grasp_cli    = self.create_client(Trigger, '/grasp')
         self.check_cli    = self.create_client(Trigger, '/move_to_check')
         self.place_cli    = self.create_client(Trigger, '/preplace_and_place')
+        self.scan_cli     = self.create_client(Trigger, '/next_scan_pose')
 
         self.create_subscription(PoseArray, '/detected_bricks',      self._on_bricks,      10)
         self.create_subscription(String,    '/detected_bricks_meta', self._on_bricks_meta, 10)
@@ -134,13 +135,29 @@ class LEGOBuildPlanner(Node):
         threading.Thread(target=self._start_worker, daemon=True).start()
 
     def _start_worker(self):
-        for cli in (self.pregrasp_cli, self.grasp_cli, self.check_cli, self.place_cli):
+        for cli in (self.pregrasp_cli, self.grasp_cli, self.check_cli, self.place_cli, self.scan_cli):
             cli.wait_for_service()
-        self.get_logger().info('All services ready — waiting for baseplate_frame...')
-        if not self._wait_for_baseplate(timeout_sec=30.0):
-            self.get_logger().error('Baseplate not detected after 30 s — aborting.')
+        self.get_logger().info('All services ready — scanning workspace...')
+        if not self._scan_workspace():
+            self.get_logger().error('Baseplate not detected after full scan — aborting.')
             return
         self._execute_step()
+
+    def _scan_workspace(self) -> bool:
+        for _ in range(12):
+            done = threading.Event()
+            self.scan_cli.call_async(Trigger.Request()).add_done_callback(lambda _: done.set())
+            done.wait(timeout=15.0)
+            time.sleep(0.8)
+            try:
+                self.tf_buffer.lookup_transform(
+                    'base_link', 'baseplate_frame',
+                    rclpy.time.Time(), timeout=Duration(seconds=0.2))
+                self.get_logger().info('Baseplate found during scan.')
+                return True
+            except (tf2_ros.LookupException, tf2_ros.ExtrapolationException):
+                self.get_logger().info(f'Baseplate not yet visible — continuing scan...')
+        return self._wait_for_baseplate(timeout_sec=10.0)
 
     def _wait_for_baseplate(self, timeout_sec: float) -> bool:
         deadline = time.time() + timeout_sec
