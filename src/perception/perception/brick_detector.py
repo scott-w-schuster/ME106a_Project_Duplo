@@ -695,7 +695,14 @@ class BrickDetectorNode(Node):
             corners, ids, _ = cv2.aruco.detectMarkers(gray, aruco_dict, parameters=params)
 
         if ids is None:
+            self.get_logger().warn(
+                f'ArUco: no markers detected (dict=DICT_5X5_250)',
+                throttle_duration_sec=5.0)
             return None
+
+        self.get_logger().info(
+            f'ArUco: found markers {ids.flatten().tolist()} — looking for ID {ARUCO_MARKER_ID}',
+            throttle_duration_sec=2.0)
 
         cam_mat = np.array([[self.fx, 0, self.cx],
                             [0, self.fy, self.cy],
@@ -730,11 +737,18 @@ class BrickDetectorNode(Node):
                                 cv2.MORPH_CLOSE, k)
 
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not contours: return None
+        if not contours:
+            self.get_logger().warn(
+                'HSV baseplate: no contours found — HSV range may not match baseplate color',
+                throttle_duration_sec=5.0)
+            return None
 
         largest = max(contours, key=cv2.contourArea)
-        if cv2.contourArea(largest) < BASEPLATE_MIN_AREA_PX:
-            self.get_logger().warn('Baseplate blob too small', once=True)
+        area = cv2.contourArea(largest)
+        if area < BASEPLATE_MIN_AREA_PX:
+            self.get_logger().warn(
+                f'HSV baseplate: largest contour {area:.0f}px < {BASEPLATE_MIN_AREA_PX}px minimum',
+                throttle_duration_sec=5.0)
             return None
 
         rect = cv2.minAreaRect(largest)
