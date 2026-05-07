@@ -172,7 +172,7 @@ class BrickDetectorNode(Node):
         self.tf_broadcaster        = tf2_ros.TransformBroadcaster(self)
         self.static_tf_broadcaster = tf2_ros.StaticTransformBroadcaster(self)
 
-        self.declare_parameter('camera_frame', 'camera_depth_optical_frame')
+        self.declare_parameter('camera_frame', 'camera_color_depth_frame')
 
         self._frame_validated = False
         self.create_timer(0.2, self.process)

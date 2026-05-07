@@ -181,42 +181,70 @@ class UR7e_CubeGrasp(Node):
         if joint_sol is None:
             return False
 
-        traj = self.ik_planner.plan_to_joints(joint_sol, vel, accel)
+        traj = self.ik_planner.plan_to_joints(joint_sol, current_joint_state=js, vel=vel, accel=accel)
         if traj is None:
             return False
 
         jt = traj.joint_trajectory
-        self._interpolate_waypoints(jt)
+        self._fix_trajectory_timing(jt)
+        self._recompute_velocities(jt)
         return self._execute_traj(jt)
 
-    def _interpolate_waypoints(self, joint_traj) -> None:
-        from builtin_interfaces.msg import Duration as RosDuration
-        from trajectory_msgs.msg import JointTrajectoryPoint
-
-        MIN_SEG_SEC = 0.1
-
+    def _fix_trajectory_timing(self, joint_traj, min_dt=0.1) -> None:
         pts = joint_traj.points
         if len(pts) < 2:
             return
 
-        new_pts = []
-        for i in range(len(pts) - 1):
-            a, b = pts[i], pts[i + 1]
-            new_pts.append(a)
-            t_a = a.time_from_start.sec + a.time_from_start.nanosec * 1e-9
-            t_b = b.time_from_start.sec + b.time_from_start.nanosec * 1e-9
-            if (t_b - t_a) < MIN_SEG_SEC:
-                continue
-            mid = JointTrajectoryPoint()
-            mid.positions     = [(float(a.positions[j])     + float(b.positions[j]))     / 2.0 for j in range(len(a.positions))]
-            mid.velocities    = [(float(a.velocities[j])    + float(b.velocities[j]))    / 2.0 for j in range(len(a.velocities))]    if a.velocities    else []
-            mid.accelerations = [(float(a.accelerations[j]) + float(b.accelerations[j])) / 2.0 for j in range(len(a.accelerations))] if a.accelerations else []
-            t_m = (t_a + t_b) / 2.0
-            mid.time_from_start = RosDuration(sec=int(t_m), nanosec=int(round((t_m - int(t_m)) * 1e9)))
-            new_pts.append(mid)
+        def get_t(pt):
+            return pt.time_from_start.sec + pt.time_from_start.nanosec * 1e-9
 
-        new_pts.append(pts[-1])
-        joint_traj.points = new_pts
+        def set_t(pt, t):
+            pt.time_from_start.sec = int(t)
+            pt.time_from_start.nanosec = int(round((t - int(t)) * 1e9))
+
+        shift = 0.0
+        for i in range(1, len(pts)):
+            t_prev = get_t(pts[i - 1])
+            t_curr = get_t(pts[i]) + shift
+            dt = t_curr - t_prev
+            if 0 < dt < min_dt:
+                ratio = dt / min_dt
+                if pts[i].velocities:
+                    pts[i].velocities    = [v * ratio for v in pts[i].velocities]
+                if pts[i].accelerations:
+                    pts[i].accelerations = [a * ratio * ratio for a in pts[i].accelerations]
+                shift  += min_dt - dt
+                t_curr += min_dt - dt
+            set_t(pts[i], t_curr)
+
+    def _recompute_velocities(self, joint_traj) -> None:
+        # UR7e joint velocity limits (rad/s) — shoulder, shoulder, elbow, wrist x3
+        VEL_LIMITS = [2.09, 2.09, 3.14, 3.14, 3.14, 3.14]
+
+        pts = joint_traj.points
+        n   = len(pts)
+        if n < 2:
+            return
+
+        def get_t(pt):
+            return pt.time_from_start.sec + pt.time_from_start.nanosec * 1e-9
+
+        n_j = len(pts[0].positions)
+
+        pts[0].velocities  = [0.0] * n_j
+        pts[-1].velocities = [0.0] * n_j
+
+        for i in range(1, n - 1):
+            dt = get_t(pts[i + 1]) - get_t(pts[i - 1])
+            vels = []
+            for j in range(n_j):
+                lim = VEL_LIMITS[j] if j < len(VEL_LIMITS) else 3.14
+                v   = (float(pts[i + 1].positions[j]) - float(pts[i - 1].positions[j])) / dt if dt > 0 else 0.0
+                vels.append(max(-lim, min(lim, v)))
+            pts[i].velocities = vels
+
+        for pt in pts:
+            pt.accelerations = []
 
     def _execute_traj(self, joint_traj) -> bool:
         done    = threading.Event()
@@ -280,7 +308,6 @@ def main(args=None):
     node = UR7e_CubeGrasp()
     executor = MultiThreadedExecutor()
     executor.add_node(node)
-    executor.add_node(node.ik_planner)
     try:
         executor.spin()
     finally:
