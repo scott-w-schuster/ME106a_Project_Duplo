@@ -162,7 +162,45 @@ class UR7e_CubeGrasp(Node):
         if traj is None:
             return False
 
-        return self._execute_traj(traj.joint_trajectory)
+        jt = traj.joint_trajectory
+        self._interpolate_waypoints(jt)
+        return self._execute_traj(jt)
+
+    def _interpolate_waypoints(self, joint_traj) -> None:
+        """Insert a linearly-interpolated midpoint between every consecutive pair
+        of waypoints.  Halves the per-segment position jump so the controller
+        sees smaller steps and is less likely to spike past velocity limits."""
+        from builtin_interfaces.msg import Duration as RosDuration
+        from trajectory_msgs.msg import JointTrajectoryPoint
+
+        pts = joint_traj.points
+        if len(pts) < 2:
+            return
+
+        new_pts = []
+        for i in range(len(pts) - 1):
+            a, b = pts[i], pts[i + 1]
+            new_pts.append(a)
+
+            mid = JointTrajectoryPoint()
+            mid.positions = [
+                (float(a.positions[j]) + float(b.positions[j])) / 2.0
+                for j in range(len(a.positions))
+            ]
+            t_a = a.time_from_start.sec + a.time_from_start.nanosec * 1e-9
+            t_b = b.time_from_start.sec + b.time_from_start.nanosec * 1e-9
+            t_m = (t_a + t_b) / 2.0
+            mid.time_from_start = RosDuration(
+                sec=int(t_m),
+                nanosec=int(round((t_m - int(t_m)) * 1e9)),
+            )
+            new_pts.append(mid)
+
+        new_pts.append(pts[-1])
+        joint_traj.points = new_pts
+        self.get_logger().info(
+            f'Interpolated trajectory: {len(pts)} → {len(new_pts)} waypoints'
+        )
 
     def _execute_traj(self, joint_traj) -> bool:
         done    = threading.Event()
