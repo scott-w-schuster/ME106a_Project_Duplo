@@ -210,28 +210,12 @@ class BrickDetectorNode(Node):
 
 
     def process(self):
-        
-        if self.latest_xyz is None or self.latest_pc_bgr is None:
-            return
         if self.latest_rgb is None:
             return
 
-        seg_bgr = self.latest_pc_bgr.copy()
-        rgb     = self.latest_rgb.copy()
-        depth   = self.latest_depth.copy() if self.latest_depth is not None else None
-        debug   = rgb.copy()
-
-        now_s = self.get_clock().now().nanoseconds * 1e-9
-        if (self._gp_last_fit is None or
-                now_s - self._gp_last_fit > GROUND_PLANE_REFIT_SECS):
-            gp = self._fit_ground_plane(self.latest_xyz)
-            if gp is not None:
-                self.ground_plane = gp
-                self._gp_last_fit = now_s
-
-        if self.ground_plane is None:
-            self.get_logger().warn('Waiting for ground plane fit...', once=True)
-            return
+        rgb   = self.latest_rgb.copy()
+        depth = self.latest_depth.copy() if self.latest_depth is not None else None
+        debug = rgb.copy()
 
         if self.fx is not None:
             bp = (self.detect_baseplate(rgb, depth)
@@ -245,6 +229,25 @@ class BrickDetectorNode(Node):
                 cv2.drawContours(debug, [box_pts], 0, (0, 200, 0), 2)
                 cv2.putText(debug, 'baseplate', tuple(box_pts[0]),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 0), 2)
+
+        if self.latest_xyz is None or self.latest_pc_bgr is None:
+            self.debug_pub.publish(self.bridge.cv2_to_imgmsg(debug, encoding='bgr8'))
+            return
+
+        seg_bgr = self.latest_pc_bgr.copy()
+
+        now_s = self.get_clock().now().nanoseconds * 1e-9
+        if (self._gp_last_fit is None or
+                now_s - self._gp_last_fit > GROUND_PLANE_REFIT_SECS):
+            gp = self._fit_ground_plane(self.latest_xyz)
+            if gp is not None:
+                self.ground_plane = gp
+                self._gp_last_fit = now_s
+
+        if self.ground_plane is None:
+            self.get_logger().warn('Waiting for ground plane fit...', once=True)
+            self.debug_pub.publish(self.bridge.cv2_to_imgmsg(debug, encoding='bgr8'))
+            return
 
         clusters   = self._cluster_above_table(self.latest_xyz, seg_bgr)
         all_bricks = []
