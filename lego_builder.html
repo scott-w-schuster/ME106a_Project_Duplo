@@ -102,6 +102,7 @@ body { display: flex; height: 100vh; overflow: hidden; font-family: 'Segoe UI', 
   <div style="flex-grow: 1;"></div>
   
   <button class="btn btn-export" id="btn-export">Export Build Plan</button>
+  <button class="btn btn-send" id="btn-send">Send to Robot</button>
   <button class="btn btn-reset" id="btn-reset">Reset Build</button>
 </div>
 
@@ -126,7 +127,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 // ── CONSTANTS ────────────────────────────────────────────────────────────────
-const GRID = 20;
+const GRID = 16;
 const VU   = 0.6;   // 1 Vertical Unit = 0.6 world units (half a standard brick)
 const SR   = 0.18;  // stud radius
 const SH   = 0.2;   // stud height
@@ -979,6 +980,62 @@ document.getElementById('btn-export').addEventListener('click', () => {
   URL.revokeObjectURL(url);
   setStatus(`Exported ${placed.length} block(s) using Top-Layer slicing.`);
 });
+
+// ── SEND TO ROBOT ─────────────────────────────────────────────────────────────
+document.getElementById('btn-send').addEventListener('click', async () => {
+  if (placed.length === 0) {
+    setStatus('Nothing to send!');
+    return;
+  }
+
+  // Sort blocks: Top-Layer first, then base layer, then grid sweep
+  const sortedBlocks = [...placed].sort((a, b) => {
+    const aTop = a.ly + a.h; 
+    const bTop = b.ly + b.h;
+    if (aTop !== bTop) return aTop - bTop;
+    if (a.ly !== b.ly) return a.ly - b.ly;
+    if (a.gz !== b.gz) return a.gz - b.gz;
+    return a.gx - b.gx;
+  });
+
+  const maxLy = Math.max(...placed.map(b => b.ly));
+  
+  const plan = {
+    metadata: { total_blocks: placed.length, layers: maxLy + 1 },
+    sequence: sortedBlocks.map((b, i) => {
+      // Determine precise height category for Python
+      let height_category = 'normal';
+      if (b.h === 1) height_category = 'half';
+      if (b.h === 4) height_category = 'tall';
+
+      return {
+        step: i + 1,
+        type: b.type,            
+        color: b.color,
+        grid_x: b.gx,            
+        layer: b.ly,             
+        grid_z: b.gz,            
+        rotation_deg: b.rot * 90,
+        height_type: height_category 
+      };
+    })
+  };
+
+  setStatus('Sending to robot...');
+  try {
+    const response = await fetch('http://localhost:5000/upload_plan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(plan)
+    });
+    
+    if (response.ok) setStatus(`Success! Sent ${placed.length} blocks to robot.`);
+    else setStatus('Failed to send plan.');
+  } catch(e) {
+    setStatus('Error: Cannot reach robot. Is planning_node.py running?');
+  }
+});
+
 // ── RESET ─────────────────────────────────────────────────────────────────────
 document.getElementById('btn-reset').addEventListener('click', () => {
   if (!confirm('Reset the build and return all blocks to inventory?')) return;
