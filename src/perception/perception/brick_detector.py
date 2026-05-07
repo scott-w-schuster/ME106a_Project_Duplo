@@ -115,9 +115,9 @@ GROUND_PLANE_REFIT_SECS = 2.0
 
 
 
-EMA_ALPHA         = 0.35
-TRACK_MAX_STALE   = 3
-TRACK_MATCH_DIST_M = 0.025   
+EMA_ALPHA          = 0.35
+TRACK_MAX_STALE    = 300     # 60 s at 5 Hz — survives arm movement between scan poses
+TRACK_MATCH_DIST_M = 0.025
 
 
 class BrickDetectorNode(Node):

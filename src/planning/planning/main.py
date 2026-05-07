@@ -178,26 +178,34 @@ class UR7e_CubeGrasp(Node):
         return self._execute_traj(jt)
 
     def _sanitize_trajectory(self, joint_traj, vel_scale: float) -> None:
-        """Recompute waypoint timing and set explicit velocities so the UR controller
-        cannot overshoot hardware limits via its own cubic-spline interpolation."""
+        """Recompute waypoint timing and zero all velocities so the UR controller
+        cannot overshoot hardware limits.
+
+        With v=0 at every waypoint, the Hermite spline peak per segment is
+        1.5 * Δpos / T.  We size T >= Δpos / (hw_limit * vel_scale * 0.5),
+        so peak <= 1.5 * 0.5 * vel_scale * hw_limit = 0.75 * vel_scale * hw_limit,
+        which is always safely below the hardware limit for any vel_scale <= 1.
+        """
         from builtin_interfaces.msg import Duration as RosDuration
 
         pts   = joint_traj.points
         names = joint_traj.joint_names
         n     = len(pts)
+        print(f'[SANITIZE] {n} pts, vel_scale={vel_scale}', flush=True)
         if n < 2:
             return
 
-        # ── Pass 1: snapshot original times, then compute new timing ─────────
+        # Snapshot original timestamps before touching any point
         orig_t = [pt.time_from_start.sec + pt.time_from_start.nanosec * 1e-9
                   for pt in pts]
 
+        # Compute new timestamps — 0.5 safety factor accounts for Hermite peak
         t_new = [0.0] * n
         for i in range(1, n):
             dt_planned = orig_t[i] - orig_t[i - 1]
             dt_min     = max(dt_planned, 1e-3)
             for j, name in enumerate(names):
-                limit = self._JOINT_VEL_LIMITS.get(name, 2.094) * vel_scale
+                limit = self._JOINT_VEL_LIMITS.get(name, 2.094) * vel_scale * 0.5
                 if limit <= 0:
                     continue
                 if j < len(pts[i].positions) and j < len(pts[i - 1].positions):
@@ -205,31 +213,16 @@ class UR7e_CubeGrasp(Node):
                     dt_min = max(dt_min, delta / limit)
             t_new[i] = t_new[i - 1] + dt_min
 
-        # ── Pass 2: compute explicit velocities via central differences ───────
-        # Central difference keeps velocities naturally within vel_scale*hw_limit.
-        # Hardware-limit clamp is a safety net for edge cases.
-        vels = []
-        for i in range(n):
-            nj = len(pts[i].positions)
-            if i == 0 or i == n - 1:
-                vels.append([0.0] * nj)
-            else:
-                dt_span = t_new[i + 1] - t_new[i - 1]
-                v = []
-                for j in range(nj):
-                    raw      = (float(pts[i + 1].positions[j]) - float(pts[i - 1].positions[j])) / dt_span
-                    hw_limit = self._JOINT_VEL_LIMITS.get(names[j] if j < len(names) else '', 2.094)
-                    v.append(max(-hw_limit, min(hw_limit, raw)))
-                vels.append(v)
-
-        # ── Pass 3: write timestamps, velocities, clear accelerations ─────────
+        # Write back: zero velocities and accelerations everywhere
+        nj = len(pts[0].positions) if pts else 0
         for i in range(n):
             secs  = int(t_new[i])
             nsecs = int(round((t_new[i] - secs) * 1e9))
             pts[i].time_from_start = RosDuration(sec=secs, nanosec=nsecs)
-            pts[i].velocities      = vels[i]
-            pts[i].accelerations   = []
+            pts[i].velocities      = [0.0] * nj
+            pts[i].accelerations   = [0.0] * nj
 
+        print(f'[SANITIZE] total {t_new[-1]:.2f}s', flush=True)
         self.get_logger().info(
             f'Trajectory sanitized: {n} pts, total {t_new[-1]:.2f}s (vel_scale={vel_scale})'
         )
