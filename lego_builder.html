@@ -93,7 +93,7 @@ body { display: flex; height: 100vh; overflow: hidden; font-family: 'Segoe UI', 
     <b>Click grid</b> to place block<br>
     <b>R</b> rotate while placing<br>
     <b>Click placed</b> to select it<br>
-    <b>R</b> rotate selected block<br>
+    <b>M</b> pick up (move) block<br> <b>R</b> rotate selected block<br>
     <b>Delete</b> remove selected<br>
     <b>Esc</b> cancel / deselect<br>
     <b>Right-drag</b> orbit camera<br>
@@ -187,18 +187,20 @@ function dims(type, rot) {
 }
 
 // ── CONNECTION LOGIC ──────────────────────────────────────────────────────────
-function hasTopStud(type, rot, localX, localZ) {
-  const { w, d, shape } = dims(type, rot);
-  if (shape === 'fillet-top-end') {
-    if (rot === 0 && localZ === 0) return false;
-    if (rot === 1 && localX === w - 1) return false;
-    if (rot === 2 && localZ === d - 1) return false;
-    if (rot === 3 && localX === 0) return false;
+function hasTopStud(type, localX, localZ) {
+  const b = BLOCK_DIMS[type];
+  if (!b) return true;
+
+  if (b.shape === 'fillet-top-end') {
+    // CHANGE THIS: localZ === b.d - 1  =>  localZ === 0
+    // This aligns the "missing stud" with the curved end of the mesh
+    if (localZ === 0) return false; 
+  } 
+  
+  if (b.shape === 'fillet-top-both') {
+    if (localZ === 0 || localZ === b.d - 1) return false;
   }
-  else if (shape === 'fillet-top-both') {
-    if (rot % 2 === 0 && (localZ === 0 || localZ === d - 1)) return false;
-    if (rot % 2 === 1 && (localX === 0 || localX === w - 1)) return false;
-  }
+  
   return true;
 }
 
@@ -394,97 +396,101 @@ groundPlane.userData.isGround = true;
 scene.add(groundPlane);
 
 // ── CUSTOM GEOMETRY BUILDER ──────────────────────────────────────────────────
-function createBodyGeometry(shape, w, d, bodyH, rot) {
-  if (shape === 'box') return new THREE.BoxGeometry(w, bodyH, d);
+function createBodyGeometry(type, bodyH) {
+  const b = BLOCK_DIMS[type];
+  const baseW = b.w;
+  const baseD = b.d;
+  const shape = b.shape;
 
-  if (shape === 'cylinder') {
-    const radius = Math.min(w, d) / 2;
-    return new THREE.CylinderGeometry(radius, radius, bodyH, 32);
-  }
+  if (shape === 'box') return new THREE.BoxGeometry(baseW, bodyH, baseD);
+  if (shape === 'cylinder') return new THREE.CylinderGeometry(Math.min(baseW, baseD)/2, Math.min(baseW, baseD)/2, bodyH, 32);
 
   if (shape.includes('fillet')) {
-    const isRotated = rot % 2 === 1;
-    const profileD = isRotated ? w : d;
-    const extrudeW = isRotated ? d : w;
-
     const s = new THREE.Shape();
-
+    
     if (shape === 'fillet-top-end') {
       s.moveTo(0, 0);
-      s.lineTo(profileD, 0);
-      s.lineTo(profileD, bodyH - 1);
-      s.quadraticCurveTo(profileD, bodyH, profileD - 1, bodyH);
-      s.lineTo(0, bodyH);
-      s.lineTo(0, 0);
-    }
+      s.lineTo(baseD, 0); 
+      s.lineTo(baseD, bodyH - 1); 
+      s.quadraticCurveTo(baseD, bodyH, baseD - 1, bodyH); // Curve at the end
+      s.lineTo(0, bodyH); 
+      s.lineTo(0, 0); 
+    } 
     else if (shape === 'fillet-top-both') {
       s.moveTo(0, 0);
-      s.lineTo(profileD, 0);
-      s.lineTo(profileD, bodyH - 1);
-      s.quadraticCurveTo(profileD, bodyH, profileD - 1, bodyH);
-      s.lineTo(1, bodyH);
-      s.quadraticCurveTo(0, bodyH, 0, bodyH - 1);
-      s.lineTo(0, 0);
-    }
+      s.lineTo(baseD, 0);
+      s.lineTo(baseD, bodyH - 1); 
+      s.quadraticCurveTo(baseD, bodyH, baseD - 1, bodyH); 
+      s.lineTo(1, bodyH); 
+      s.quadraticCurveTo(0, bodyH, 0, bodyH - 1); 
+      s.lineTo(0, 0); 
+    } 
     else if (shape === 'fillet-bot-both') {
       s.moveTo(1, 0);
-      s.lineTo(profileD - 1, 0);
-      s.quadraticCurveTo(profileD, 0, profileD, 1);
-      s.lineTo(profileD, bodyH);
+      s.lineTo(baseD - 1, 0); 
+      s.quadraticCurveTo(baseD, 0, baseD, 1);
+      s.lineTo(baseD, bodyH);
       s.lineTo(0, bodyH);
       s.lineTo(0, 1);
       s.quadraticCurveTo(0, 0, 1, 0);
     }
 
-    const geo = new THREE.ExtrudeGeometry(s, { depth: extrudeW, bevelEnabled: false });
-    geo.rotateY(Math.PI / 2);
-    geo.translate(-extrudeW / 2, -bodyH / 2, profileD / 2);
-    if (isRotated) geo.rotateY(-Math.PI / 2);
+    const geo = new THREE.ExtrudeGeometry(s, { depth: baseW, bevelEnabled: false });
+
+    // Rotate to align: Shape-X (length) becomes World-Z
+    geo.rotateY(Math.PI / 2); 
+
+    // Fix the centering:
+    // We must translate by HALF the dimensions to align the 0,0,0 local origin
+    // with the center of the brick's footprint.
+    geo.translate(-baseW / 2, -bodyH / 2, baseD / 2);
+    
     return geo;
   }
 }
 
 // ── BRICK MESH FACTORY ───────────────────────────────────────────────────────
 function makeBrick(type, color, rot, { ghost = false, invalid = false } = {}) {
-  const { w, d, h, shape } = dims(type, rot);
-  const totalH = h * VU;
-  const bodyH  = totalH - SH;
-  const group  = new THREE.Group();
+  const bDim = BLOCK_DIMS[type];
+  const bodyH = (bDim.h * VU) - SH;
+  const group = new THREE.Group();
 
   const baseColor = invalid ? 0xff2222 : COLOR_HEX[color];
   const darkColor = invalid ? 0xaa1111 : COLOR_DARK[color];
-  const opacity   = ghost ? 0.52 : 1.0;
-  const trans     = ghost || invalid;
+  const opacity = ghost ? 0.52 : 1.0;
+  const trans = ghost || invalid;
 
+  // 1. Create Body (Build at North orientation)
   const bodyMat = new THREE.MeshLambertMaterial({ color: baseColor, transparent: trans, opacity });
-  const bodyGeo = createBodyGeometry(shape, w, d, bodyH, rot);
-  const body    = new THREE.Mesh(bodyGeo, bodyMat);
-  body.position.y  = bodyH / 2;
-  body.castShadow  = !ghost;
+  const bodyGeo = createBodyGeometry(type, bodyH); 
+  const body = new THREE.Mesh(bodyGeo, bodyMat);
+  body.position.y = bodyH / 2;
+  body.castShadow = !ghost;
   body.receiveShadow = true;
   group.add(body);
   group.userData.bodyMesh = body;
 
-  if (!ghost && shape === 'box') {
-    const edgeMat = new THREE.MeshLambertMaterial({ color: darkColor });
-    const edge    = new THREE.Mesh(new THREE.BoxGeometry(w - 0.06, 0.1, d - 0.06), edgeMat);
-    edge.position.y = 0.05;
-    group.add(edge);
-  }
-
+  // 2. Add Studs (Positioned relative to unrotated center)
   const studMat = new THREE.MeshLambertMaterial({ color: darkColor, transparent: trans, opacity });
   const studGeo = new THREE.CylinderGeometry(SR, SR, SH, 8);
+  
+  for (let x = 0; x < bDim.w; x++) {
+    for (let z = 0; z < bDim.d; z++) {
+      if (!hasTopStud(type, x, z)) continue; // Simplified check
 
-  for (let sx = 0; sx < w; sx++) {
-    for (let sz = 0; sz < d; sz++) {
-      if (hasTopStud(type, rot, sx, sz)) {
-        const s = new THREE.Mesh(studGeo, studMat);
-        s.position.set(sx - w / 2 + 0.5, bodyH + SH / 2, sz - d / 2 + 0.5);
-        s.castShadow = !ghost;
-        group.add(s);
-      }
+      const s = new THREE.Mesh(studGeo, studMat);
+      s.position.set(
+        x - (bDim.w - 1) / 2, 
+        bodyH + SH / 2, 
+        z - (bDim.d - 1) / 2
+      );
+      s.castShadow = !ghost;
+      group.add(s);
     }
   }
+
+  // 3. Final Group Rotation (The whole assembly spins around 0,0,0)
+  group.rotation.y = -rot * (Math.PI / 2);
 
   return group;
 }
@@ -677,10 +683,45 @@ function selectBlock(id) {
   setStatus('Delete to remove · R to rotate · Esc to deselect');
 }
 
+function pickupBlock(id) {
+  const b = placed.find(p => p.id === id);
+  if (!b) return;
+
+  // 1. Check if anything is resting on top (reuse logic from deleteBlock)
+  const topLy = b.ly + b.h;
+  for (const [x, z] of b.cells) {
+    if (occ[`${x},${z},${topLy}`]) {
+      setStatus('Cannot move — blocks rest on top of this one');
+      return;
+    }
+  }
+
+  // 2. Capture the block's data before it's deleted
+  const { type, color, rot } = b;
+
+  // 3. Remove it from the world (this returns it to inventory)
+  deleteBlock(id);
+
+  // 4. Force enter the "Dragging" state
+  dragging = true;
+  dragType = type;
+  dragColor = color;
+  dragRot = rot;
+  
+  // Update UI and Camera
+  controls.enabled = false;
+  createGhost();
+  moveGhost(lastMx, lastMy); // Snap ghost to current mouse position
+  showRotBadge(dragRot * 90);
+  
+  setStatus(`Moving ${color} ${type} — Release to place`);
+}
+
 // ── ROTATE PLACED BLOCK ───────────────────────────────────────────────────────
 function rotatePlaced(id) {
   const b = placed.find(p => p.id === id);
   if (!b) return;
+
   const newRot = (b.rot + 1) % 4;
   const { w: ow, d: od } = dims(b.type, b.rot);
   const cx = b.gx + (ow - 1) / 2;
@@ -689,36 +730,59 @@ function rotatePlaced(id) {
   const ngx = Math.round(cx - (nw - 1) / 2);
   const ngz = Math.round(cz - (nd - 1) / 2);
 
+  // 1. Temporarily remove from occupancy grid
   for (let i = 0; i < b.h; i++) {
     b.cells.forEach(([x, z]) => delete occ[`${x},${z},${b.ly + i}`]);
   }
 
-  if (isValid(ngx, ngz, b.type, newRot, b.ly)) {
-    scene.remove(b.mesh);
+  // 2. Check if the block itself can fit in the new orientation
+  const canPlaceSelf = isValid(ngx, ngz, b.type, newRot, b.ly);
+  
+  let stabilityOk = true;
+  if (canPlaceSelf) {
+    // 3. Stability Audit: If I rotate, do the blocks above me stay supported?
+    // Temporarily add the NEW cells to the grid to check support
+    const nextCells = cells(ngx, ngz, b.type, newRot);
+    for (let i = 0; i < b.h; i++) {
+      nextCells.forEach(([x, z]) => { occ[`${x},${z},${b.ly + i}`] = b.id; });
+    }
 
+    // Check every block that was sitting on the old layer
+    const blocksAbove = placed.filter(p => p.ly === b.ly + b.h);
+    for (const topBlock of blocksAbove) {
+      if (!isValid(topBlock.gx, topBlock.gz, topBlock.type, topBlock.rot, topBlock.ly, topBlock.id)) {
+        stabilityOk = false;
+        break;
+      }
+    }
+
+    // Clean up the temporary occupancy
+    for (let i = 0; i < b.h; i++) {
+      nextCells.forEach(([x, z]) => delete occ[`${x},${z},${b.ly + i}`]);
+    }
+  }
+
+  // 4. Finalize or Revert
+  if (canPlaceSelf && stabilityOk) {
+    scene.remove(b.mesh);
     const newMesh = makeBrick(b.type, b.color, newRot);
     newMesh.position.set(gW(ngx) + (nw - 1) / 2, b.ly * VU, gW(ngz) + (nd - 1) / 2);
     newMesh.userData.bodyMesh.userData.blockId = b.id;
     scene.add(newMesh);
 
-    b.mesh = newMesh;
-    b.bodyMesh = newMesh.userData.bodyMesh;
-    b.gx = ngx;
-    b.gz = ngz;
-    b.rot = newRot;
-    b.cells = cells(ngx, ngz, b.type, newRot);
-
+    Object.assign(b, { mesh: newMesh, bodyMesh: newMesh.userData.bodyMesh, gx: ngx, gz: ngz, rot: newRot, cells: cells(ngx, ngz, b.type, newRot) });
+    
     for (let i = 0; i < b.h; i++) {
       b.cells.forEach(([x, z]) => { occ[`${x},${z},${b.ly + i}`] = b.id; });
     }
-
     selectBlock(b.id);
-    setStatus('Block rotated');
+    setStatus('Block rotated successfully');
   } else {
+    // Revert to original occupancy
     for (let i = 0; i < b.h; i++) {
       b.cells.forEach(([x, z]) => { occ[`${x},${z},${b.ly + i}`] = b.id; });
     }
-    setStatus('Cannot rotate — space occupied or out of bounds');
+    setStatus(!canPlaceSelf ? 'Cannot rotate — blocked' : 'Cannot rotate — would leave blocks floating');
   }
 }
 
@@ -833,6 +897,10 @@ document.addEventListener('keydown', e => {
     } else if (selectedId) {
       rotatePlaced(selectedId);
     }
+    return;
+  }
+  if ((e.key === 'm' || e.key === 'M') && selectedId) {
+    pickupBlock(selectedId);
     return;
   }
   if ((e.key === 'Delete' || e.key === 'Backspace') && selectedId) {
