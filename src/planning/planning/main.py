@@ -36,9 +36,9 @@ SCAN_POSES = [
 class UR7e_CubeGrasp(Node):
 
     PRE_GRASP_OFFSET = 0.185
-    GRASP_OFFSET     = 0.1
+    GRASP_OFFSET     = 0.103
     PRE_PLACE_OFFSET = 0.185
-    PLACE_OFFSET     = 0.1
+    PLACE_OFFSET     = 0.1025
 
     def __init__(self):
         super().__init__('cube_grasp')
