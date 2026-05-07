@@ -1,5 +1,3 @@
-import threading
-
 import rclpy
 from rclpy.node import Node
 from moveit_msgs.srv import GetPositionIK, GetMotionPlan
@@ -21,11 +19,6 @@ class IKPlanner(Node):
             while not srv.wait_for_service(timeout_sec=1.0):
                 self.get_logger().info(f'Waiting for /{name} service...')
 
-    def _wait(self, future, timeout=10.0) -> bool:
-        done = threading.Event()
-        future.add_done_callback(lambda _: done.set())
-        return done.wait(timeout=timeout)
-
     def compute_ik(self, current_joint_state, x, y, z,
                    qx=0.0, qy=1.0, qz=0.0, qw=0.0):
         pose = PoseStamped()
@@ -46,9 +39,7 @@ class IKPlanner(Node):
         req.ik_request.pose_stamped = pose
 
         future = self.ik_client.call_async(req)
-        if not self._wait(future):
-            self.get_logger().error('IK service timed out.')
-            return None
+        rclpy.spin_until_future_complete(self, future)
 
         result = future.result()
         if result is None or result.error_code.val != result.error_code.SUCCESS:
@@ -58,13 +49,16 @@ class IKPlanner(Node):
         self.get_logger().info('IK solution found.')
         return result.solution.joint_state
 
-    def plan_to_joints(self, target_joint_state, vel=0.1, accel=0.1):
+    def plan_to_joints(self, target_joint_state, current_joint_state=None, vel=0.1, accel=0.1):
         req = GetMotionPlan.Request()
         req.motion_plan_request.group_name = 'ur_manipulator'
         req.motion_plan_request.allowed_planning_time = 5.0
         req.motion_plan_request.planner_id = 'RRTConnectkConfigDefault'
         req.motion_plan_request.max_velocity_scaling_factor     = vel
         req.motion_plan_request.max_acceleration_scaling_factor = accel
+
+        if current_joint_state is not None:
+            req.motion_plan_request.start_state.joint_state = current_joint_state
 
         constraints = Constraints()
         for name, pos in zip(target_joint_state.name, target_joint_state.position):
@@ -80,9 +74,7 @@ class IKPlanner(Node):
         req.motion_plan_request.goal_constraints.append(constraints)
 
         future = self.plan_client.call_async(req)
-        if not self._wait(future):
-            self.get_logger().error('Planning service timed out.')
-            return None
+        rclpy.spin_until_future_complete(self, future)
 
         result = future.result()
         if result is None or result.motion_plan_response.error_code.val != 1:

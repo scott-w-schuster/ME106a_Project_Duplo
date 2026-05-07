@@ -181,7 +181,7 @@ class UR7e_CubeGrasp(Node):
         if joint_sol is None:
             return False
 
-        traj = self.ik_planner.plan_to_joints(joint_sol, vel, accel)
+        traj = self.ik_planner.plan_to_joints(joint_sol, current_joint_state=js, vel=vel, accel=accel)
         if traj is None:
             return False
 
@@ -280,7 +280,6 @@ def main(args=None):
     node = UR7e_CubeGrasp()
     executor = MultiThreadedExecutor()
     executor.add_node(node)
-    executor.add_node(node.ik_planner)
     try:
         executor.spin()
     finally:
