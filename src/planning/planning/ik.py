@@ -70,7 +70,7 @@ class IKPlanner(Node):
         req = GetMotionPlan.Request()
         req.motion_plan_request.group_name                      = 'ur_manipulator'
         req.motion_plan_request.allowed_planning_time           = 5.0
-        req.motion_plan_request.num_planning_attempts           = 5
+        req.motion_plan_request.num_planning_attempts           = 1
         req.motion_plan_request.planner_id                      = 'RRTConnectkConfigDefault'
         req.motion_plan_request.max_velocity_scaling_factor     = velocity_scale
         req.motion_plan_request.max_acceleration_scaling_factor = accel_scale

@@ -165,7 +165,7 @@ class LEGOBuildPlanner(Node):
                 _d.set()
 
             self.scan_cli.call_async(Trigger.Request()).add_done_callback(_cb)
-            if not done.wait(timeout=20.0):
+            if not done.wait(timeout=90.0):
                 self.get_logger().warn(f'Scan pose {i + 1} timed out')
             elif resp[0] is not None and not resp[0].success:
                 self.get_logger().warn(
