@@ -91,7 +91,7 @@ class UR7e_CubeGrasp(Node):
         ox, oy, oz, ow = p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w
 
         ok = (self._move_to(p.position.x, p.position.y, p.position.z + self.GRASP_OFFSET,
-                            ox, oy, oz, ow, vel=0.07, accel=0.05)
+                            ox, oy, oz, ow, vel=0.05, accel=0.05)
               and self._toggle_gripper()
               and self._move_to(p.position.x, p.position.y, p.position.z + self.PRE_GRASP_OFFSET,
                                 ox, oy, oz, ow, vel=0.1, accel=0.1))
