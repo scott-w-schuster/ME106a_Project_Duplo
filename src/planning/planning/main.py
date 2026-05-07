@@ -178,30 +178,39 @@ class UR7e_CubeGrasp(Node):
         return self._execute_traj(jt)
 
     def _sanitize_trajectory(self, joint_traj, vel_scale: float) -> None:
-        """Rescale waypoint timing so no joint velocity exceeds hardware limits."""
+        """Recompute waypoint timing so no joint velocity exceeds hardware limits,
+        then strip MoveIt-generated velocity/acceleration fields so the UR controller
+        interpolates purely from positions + corrected timestamps."""
         from builtin_interfaces.msg import Duration as RosDuration
 
         pts   = joint_traj.points
         names = joint_traj.joint_names
-        if len(pts) < 2:
+        n     = len(pts)
+        if n < 2:
             return
 
-        # Ensure first point is anchored at t=0 with zero velocity
-        pts[0].time_from_start = RosDuration(sec=0, nanosec=0)
-        if pts[0].velocities:
-            pts[0].velocities = [0.0] * len(pts[0].velocities)
+        # Snapshot original timestamps BEFORE modifying anything so dt_planned
+        # is always computed from the planner's original segment durations.
+        orig_t = [
+            pt.time_from_start.sec + pt.time_from_start.nanosec * 1e-9
+            for pt in pts
+        ]
 
         t_acc = 0.0
-        for i in range(1, len(pts)):
+        for i in range(n):
+            nj = len(pts[i].positions)
+
+            if i == 0:
+                pts[0].time_from_start = RosDuration(sec=0, nanosec=0)
+                pts[0].velocities     = [0.0] * nj
+                pts[0].accelerations  = [0.0] * nj
+                continue
+
+            dt_planned = orig_t[i] - orig_t[i - 1]
+            dt_min     = max(dt_planned, 1e-3)
+
             prev = pts[i - 1]
             curr = pts[i]
-
-            dt_planned = (
-                (curr.time_from_start.sec  - prev.time_from_start.sec) +
-                (curr.time_from_start.nanosec - prev.time_from_start.nanosec) * 1e-9
-            )
-            dt_min = max(dt_planned, 1e-3)  # never let a segment be zero-duration
-
             for j, name in enumerate(names):
                 limit = self._JOINT_VEL_LIMITS.get(name, 2.094) * vel_scale
                 if limit <= 0:
@@ -215,8 +224,18 @@ class UR7e_CubeGrasp(Node):
             nsecs = int(round((t_acc - secs) * 1e9))
             pts[i].time_from_start = RosDuration(sec=secs, nanosec=nsecs)
 
-        self.get_logger().debug(
-            f'Trajectory sanitized: {len(pts)} pts, '
+            # Clear MoveIt velocities/accelerations on all intermediate points;
+            # keep explicit zeros only on first and last so the controller splines
+            # correctly without hitting hardware limits mid-trajectory.
+            if i < n - 1:
+                pts[i].velocities    = []
+                pts[i].accelerations = []
+            else:
+                pts[i].velocities    = [0.0] * nj
+                pts[i].accelerations = [0.0] * nj
+
+        self.get_logger().info(
+            f'Trajectory sanitized: {n} pts, '
             f'total {t_acc:.2f}s (vel_scale={vel_scale})'
         )
 
