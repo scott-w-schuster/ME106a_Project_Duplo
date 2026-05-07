@@ -36,10 +36,9 @@ BRICK_HEIGHTS = {'half': 0.0096, 'normal': 0.0192, 'tall': 0.0384}
 TF_TIMEOUT_SEC       = 1.0
 PICK_VERIFY_RADIUS_M = 0.05
 
-# Calibration offsets — tune these to align gripper with brick centroid/axis
-GRIPPER_ROT_OFFSET_DEG = 0.0   # +/- degrees to rotate gripper around Z to align with brick long axis
-PICK_X_OFFSET_M        = 0.0   # metres to shift pick pose in X (base_link frame) to center gripper
-PICK_Y_OFFSET_M        = 0.0   # metres to shift pick pose in Y (base_link frame) to center gripper
+GRIPPER_ROT_OFFSET_DEG = 0.0
+PICK_X_OFFSET_M        = 0.0
+PICK_Y_OFFSET_M        = 0.0
 
 LATCH = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
@@ -67,7 +66,6 @@ class LEGOBuildPlanner(Node):
         self._latest_meta     = None
         self._last_pick_pose  = None
         self._last_pick_color = None
-        # Accumulated across all scan poses; keyed by (color, type, x_bucket, y_bucket)
         self._scan_inventory: dict = {}
 
         self.pick_pub  = self.create_publisher(PoseStamped, '/pick_pose',  LATCH)
@@ -117,7 +115,6 @@ class LEGOBuildPlanner(Node):
 
     @staticmethod
     def _normalize_step(s: dict) -> dict:
-        """Map JSONBin step schema → internal schema."""
         gp = s.get('grid_position', {})
         return {
             'type':         s.get('type') or s.get('block_type', '2x4'),
@@ -207,17 +204,9 @@ class LEGOBuildPlanner(Node):
         return resp[0] is not None and resp[0].success
 
     def _full_scan(self) -> tuple:
-        """Visit all scan poses to locate baseplate and accumulate all brick detections.
-
-        Returns (baseplate_found: bool, inventory: list).
-        The inventory list contains one entry per unique brick location seen across
-        all poses (deduplicated by 5 cm position bucket).
-        Always completes all poses even if baseplate is found early.
-        """
-        N_SCAN = 7  # must match len(SCAN_POSES) in main.py
+        N_SCAN = 7
         self._scan_inventory.clear()
 
-        # Pre-check: baseplate may already be visible before any motion
         baseplate_found = self._baseplate_visible()
         if baseplate_found:
             self.get_logger().info('Baseplate already visible before scan.')
@@ -226,7 +215,7 @@ class LEGOBuildPlanner(Node):
             print(f'[PLANNER] Scan pose {i + 1}/{N_SCAN}', flush=True)
             self.get_logger().info(f'Scan pose {i + 1}/{N_SCAN}')
             self._call_scan_pose()
-            time.sleep(1.5)   # let perception integrate the new viewpoint
+            time.sleep(1.5)
 
             if not baseplate_found:
                 baseplate_found = self._baseplate_visible()
@@ -234,9 +223,6 @@ class LEGOBuildPlanner(Node):
                     self.get_logger().info(f'Baseplate found at scan pose {i + 1}/{N_SCAN}.')
                     break
 
-            # Accumulate detections from this viewpoint into scan_inventory.
-            # Key by (color, type, 5-cm position bucket) so the same brick seen
-            # from multiple poses counts only once, and the latest observation wins.
             for brick in self._detect_bricks():
                 px = brick['pose'].pose.position.x
                 py = brick['pose'].pose.position.y
@@ -252,7 +238,6 @@ class LEGOBuildPlanner(Node):
         return baseplate_found, inventory
 
     def _verify_build_inventory(self, inventory: list) -> bool:
-        """Compare the scan-accumulated brick list against the build plan."""
         required: dict = {}
         for step in self.build_sequence:
             key = (step['color'], step['type'])
@@ -296,7 +281,6 @@ class LEGOBuildPlanner(Node):
         detected = self._detect_bricks()
         brick_match = self._find_brick(detected, step['type'], step['color'])
         if brick_match is None:
-            # Fall back to the scan inventory so an out-of-frame brick isn't skipped
             scan_bricks = list(self._scan_inventory.values())
             brick_match = self._find_brick(scan_bricks, step['type'], step['color'])
             if brick_match is not None:

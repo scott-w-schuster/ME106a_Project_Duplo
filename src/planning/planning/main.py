@@ -14,16 +14,15 @@ from sensor_msgs.msg import JointState
 
 from planning.ik import IKPlanner
 
-# Arm moves to this pose after grasping so the planning node can verify pickup
 CHECK_X = 0.095
 CHECK_Y = 0.418
 CHECK_Z = 0.188
 
 LATCH = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
-SPEED_SLOW = 0.05   # grasping / placing
-SPEED_MED  = 0.15   # approach / retreat
-SPEED_FAST = 0.3    # transit / scan
+SPEED_SLOW = 0.05
+SPEED_MED  = 0.15
+SPEED_FAST = 0.3
 
 SCAN_POSES = [
    (0.095,  0.408, 0.288),
@@ -34,7 +33,6 @@ SCAN_POSES = [
    (-0.295,  0.408, 0.288),
    (-0.395,  0.408, 0.288),
 ]
-
 
 
 class UR7e_CubeGrasp(Node):
@@ -49,18 +47,15 @@ class UR7e_CubeGrasp(Node):
 
         cb = ReentrantCallbackGroup()
 
-        # ── Pose inputs from planning node ────────────────────────────────────
         self.pick_pose  = None
         self.place_pose = None
         self.create_subscription(PoseStamped, '/pick_pose',  self._on_pick_pose,  LATCH, callback_group=cb)
         self.create_subscription(PoseStamped, '/place_pose', self._on_place_pose, LATCH, callback_group=cb)
 
-        # ── Joint state ───────────────────────────────────────────────────────
         self.joint_state = None
         self._js_lock = threading.Lock()
         self.create_subscription(JointState, '/joint_states', self._on_joint_state, 1, callback_group=cb)
 
-        # ── Service servers (planning node calls these in order) ──────────────
         self._scan_idx = 0
         self.create_service(Trigger, '/move_to_pregrasp',     self._handle_pregrasp,   callback_group=cb)
         self.create_service(Trigger, '/grasp',                self._handle_grasp,      callback_group=cb)
@@ -68,7 +63,6 @@ class UR7e_CubeGrasp(Node):
         self.create_service(Trigger, '/preplace_and_place',   self._handle_place,      callback_group=cb)
         self.create_service(Trigger, '/next_scan_pose',       self._handle_scan_pose,  callback_group=cb)
 
-        # ── Hardware ──────────────────────────────────────────────────────────
         self.exec_ac = ActionClient(
             self, FollowJointTrajectory,
             '/scaled_joint_trajectory_controller/follow_joint_trajectory',
@@ -79,8 +73,6 @@ class UR7e_CubeGrasp(Node):
         self.ik_planner = IKPlanner()
         self._motion_lock = threading.Lock()
 
-    # ── Subscriptions ─────────────────────────────────────────────────────────
-
     def _on_pick_pose(self, msg):
         self.pick_pose = msg
 
@@ -90,8 +82,6 @@ class UR7e_CubeGrasp(Node):
     def _on_joint_state(self, msg):
         with self._js_lock:
             self.joint_state = msg
-
-    # ── Service handlers (block until motion complete) ────────────────────────
 
     def _handle_scan_pose(self, _request, response):
         x, y, z = SCAN_POSES[self._scan_idx % len(SCAN_POSES)]
@@ -148,8 +138,6 @@ class UR7e_CubeGrasp(Node):
               and self._move_to(p.position.x, p.position.y, p.position.z + self.PRE_PLACE_OFFSET,
                                 ox, oy, oz, ow, speed=SPEED_MED))
         return self._result(response, ok, 'place')
-
-    # ── Motion helpers ────────────────────────────────────────────────────────
 
     def _move_to(self, x, y, z, qx=0.0, qy=1.0, qz=0.0, qw=0.0, speed=SPEED_MED) -> bool:
         with self._motion_lock:
@@ -242,8 +230,6 @@ class UR7e_CubeGrasp(Node):
         done.wait(timeout=5.0)
         self.get_logger().info('Gripper toggled')
         return result[0] is not None
-
-    # ── Response helpers ──────────────────────────────────────────────────────
 
     def _result(self, response, ok, step):
         response.success = ok

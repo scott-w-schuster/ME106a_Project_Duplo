@@ -71,8 +71,6 @@ VALID_BRICK_SHAPES = {(1, 2), (2, 2), (2, 4), (2, 6)}
 BASEPLATE_ROWS = 16
 BASEPLATE_COLS = 16
 
-# Offset from ArUco marker centre → baseplate stud (0,0) in the marker frame.
-# Marker is edge-flush in the bottom-right corner of a 16×16-stud baseplate.
 ARUCO_TO_BP_OFFSET = np.array([
     -(BASEPLATE_COLS * STUD_PITCH_M - ARUCO_MARKER_SIZE_M / 2.0),
     -(BASEPLATE_ROWS * STUD_PITCH_M - ARUCO_MARKER_SIZE_M / 2.0),
@@ -113,11 +111,15 @@ TF_TIMEOUT_SEC = 1.0
 
 GROUND_PLANE_REFIT_SECS = 2.0
 
+ARUCO_WINDOW = 8   # rolling window of ArUco detections to average for stable baseplate TF
 
 
-EMA_ALPHA          = 0.35
-TRACK_MAX_STALE    = 300     # 60 s at 5 Hz — survives arm movement between scan poses
-TRACK_MATCH_DIST_M = 0.025
+
+EMA_ALPHA             = 0.15
+TRACK_MAX_STALE       = 300
+TRACK_MATCH_DIST_M    = 0.025
+TRACK_MIN_VIEWPOINTS  = 2
+VIEWPOINT_BUCKET_M    = 0.05
 
 
 class BrickDetectorNode(Node):
@@ -141,6 +143,8 @@ class BrickDetectorNode(Node):
         self._gp_last_fit: float = None
 
         self.baseplate_z_cam = None
+
+        self._aruco_window: list = []   # rolling buffer of (translation, quaternion) in base_link
 
         self._tracks: list = []
 
@@ -272,7 +276,7 @@ class BrickDetectorNode(Node):
             if (min(rows, cols), max(rows, cols)) not in VALID_BRICK_SHAPES:
                 continue
 
-            centroid  = cluster_pts.mean(axis=0)
+            centroid  = np.median(cluster_pts, axis=0)
             heights   = -(cluster_pts @ normal + d)
             heights   = heights[heights > 0]
             height_m  = (float(np.percentile(heights, HEIGHT_PERCENTILE))
@@ -696,7 +700,6 @@ class BrickDetectorNode(Node):
         except Exception:
             pass
 
-        # (label, image, minMarkerPerimeterRate, adaptThreshMin, adaptThreshMax, adaptThreshStep)
         attempts = [
             ('raw+permissive',        gray,            0.01, 3,   53,  4),
             ('clahe+permissive',      gray_clahe,      0.01, 3,   53,  4),
@@ -816,8 +819,12 @@ class BrickDetectorNode(Node):
         valid   = window[(window > 0) & np.isfinite(window)]
         if len(valid) == 0: return None
         Z = float(np.median(valid))
-        X = (cx_px - self.cx) * Z / self.fx
-        Y = (cy_px - self.cy) * Z / self.fy
+        cam_mat = np.array([[self.fx, 0, self.cx], [0, self.fy, self.cy], [0, 0, 1]], np.float32)
+        undist  = cv2.undistortPoints(
+            np.array([[[cx_px, cy_px]]], dtype=np.float32), cam_mat, self.dist_coeffs, P=cam_mat)
+        cx_u, cy_u = float(undist[0, 0, 0]), float(undist[0, 0, 1])
+        X = (cx_u - self.cx) * Z / self.fx
+        Y = (cy_u - self.cy) * Z / self.fy
         return X, Y, Z, angle_deg, box_pts
 
     def publish_baseplate_tf(self, X, Y, Z, angle_deg):
@@ -844,19 +851,50 @@ class BrickDetectorNode(Node):
                 throttle_duration_sec=5.0)
             return
 
+        quat = np.array([pose_base.orientation.x, pose_base.orientation.y,
+                         pose_base.orientation.z, pose_base.orientation.w])
+        txyz = np.array([pose_base.position.x, pose_base.position.y, pose_base.position.z])
+        self._aruco_window.append((txyz, quat))
+        if len(self._aruco_window) > ARUCO_WINDOW:
+            self._aruco_window.pop(0)
+
+        avg_t = np.mean([s[0] for s in self._aruco_window], axis=0)
+        quats = np.array([s[1] for s in self._aruco_window])
+        ref = quats[0]
+        quats[np.dot(quats, ref) < 0] *= -1
+        avg_q = quats.mean(axis=0)
+        avg_q /= np.linalg.norm(avg_q)
+
         t                         = TransformStamped()
         t.header.stamp            = self.get_clock().now().to_msg()
         t.header.frame_id         = 'base_link'
         t.child_frame_id          = 'baseplate_frame'
-        t.transform.translation.x = pose_base.position.x
-        t.transform.translation.y = pose_base.position.y
-        t.transform.translation.z = pose_base.position.z
-        t.transform.rotation      = pose_base.orientation
+        t.transform.translation.x = float(avg_t[0])
+        t.transform.translation.y = float(avg_t[1])
+        t.transform.translation.z = float(avg_t[2])
+        t.transform.rotation.x    = float(avg_q[0])
+        t.transform.rotation.y    = float(avg_q[1])
+        t.transform.rotation.z    = float(avg_q[2])
+        t.transform.rotation.w    = float(avg_q[3])
         self.tf_broadcaster.sendTransform(t)
+
+    def _current_viewpoint(self):
+        camera_frame = self.get_parameter('camera_frame').get_parameter_value().string_value
+        try:
+            tf = self.tf_buffer.lookup_transform(
+                'base_link', camera_frame, rclpy.time.Time(), timeout=Duration(seconds=0.1))
+            t = tf.transform.translation
+            return (round(t.x / VIEWPOINT_BUCKET_M),
+                    round(t.y / VIEWPOINT_BUCKET_M),
+                    round(t.z / VIEWPOINT_BUCKET_M))
+        except (tf2_ros.LookupException, tf2_ros.ExtrapolationException):
+            return None
 
     def _update_tracks(self, bricks_base: list):
         for track in self._tracks:
             track['stale'] += 1
+
+        viewpoint = self._current_viewpoint()
 
         for brick in bricks_base:
             px        = brick['pose_base'].position
@@ -884,6 +922,8 @@ class BrickDetectorNode(Node):
                 track['height_type'] = brick['height_type']
                 track['height_m']    = brick['height_m']
                 track['stale']       = 0
+                if viewpoint is not None:
+                    track['viewpoints'].add(viewpoint)
             else:
                 self._tracks.append({
                     'color':       brick['color'],
@@ -892,6 +932,7 @@ class BrickDetectorNode(Node):
                     'height_m':    brick['height_m'],
                     'pose_base':   brick['pose_base'],
                     'stale':       0,
+                    'viewpoints':  {viewpoint} if viewpoint is not None else set(),
                 })
 
         self._tracks = [t for t in self._tracks if t['stale'] <= TRACK_MAX_STALE]
@@ -946,6 +987,8 @@ class BrickDetectorNode(Node):
         bricks_out = []
 
         for track in self._tracks:
+            if len(track['viewpoints']) < TRACK_MIN_VIEWPOINTS:
+                continue
             pose_out = self._snap_to_grid(track['pose_base'], track['shape'])
             pose_array.poses.append(pose_out)
             meta_list.append({
