@@ -1,3 +1,4 @@
+import queue as _queue
 import threading
 
 import rclpy
@@ -20,10 +21,6 @@ CHECK_Z = 0.188
 
 LATCH = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
-SPEED_SLOW = 0.05
-SPEED_MED  = 0.15
-SPEED_FAST = 0.3
-
 SCAN_POSES = [
    (0.095,  0.408, 0.288),
    (0.195,  0.408, 0.288),
@@ -38,9 +35,9 @@ SCAN_POSES = [
 class UR7e_CubeGrasp(Node):
 
     PRE_GRASP_OFFSET = 0.185
-    GRASP_OFFSET     = 0.103
+    GRASP_OFFSET     = 0.1
     PRE_PLACE_OFFSET = 0.185
-    PLACE_OFFSET     = 0.1025
+    PLACE_OFFSET     = 0.1
 
     def __init__(self):
         super().__init__('cube_grasp')
@@ -57,11 +54,11 @@ class UR7e_CubeGrasp(Node):
         self.create_subscription(JointState, '/joint_states', self._on_joint_state, 1, callback_group=cb)
 
         self._scan_idx = 0
-        self.create_service(Trigger, '/move_to_pregrasp',     self._handle_pregrasp,   callback_group=cb)
-        self.create_service(Trigger, '/grasp',                self._handle_grasp,      callback_group=cb)
-        self.create_service(Trigger, '/move_to_check',        self._handle_check,      callback_group=cb)
-        self.create_service(Trigger, '/preplace_and_place',   self._handle_place,      callback_group=cb)
-        self.create_service(Trigger, '/next_scan_pose',       self._handle_scan_pose,  callback_group=cb)
+        self.create_service(Trigger, '/move_to_pregrasp',   self._handle_pregrasp,  callback_group=cb)
+        self.create_service(Trigger, '/grasp',              self._handle_grasp,     callback_group=cb)
+        self.create_service(Trigger, '/move_to_check',      self._handle_check,     callback_group=cb)
+        self.create_service(Trigger, '/preplace_and_place', self._handle_place,     callback_group=cb)
+        self.create_service(Trigger, '/next_scan_pose',     self._handle_scan_pose, callback_group=cb)
 
         self.exec_ac = ActionClient(
             self, FollowJointTrajectory,
@@ -71,7 +68,10 @@ class UR7e_CubeGrasp(Node):
         self.gripper_cli = self.create_client(Trigger, '/toggle_gripper', callback_group=cb)
 
         self.ik_planner = IKPlanner()
-        self._motion_lock = threading.Lock()
+
+        self._cmd_queue = _queue.Queue()
+        self._worker = threading.Thread(target=self._drain_queue, daemon=True)
+        self._worker.start()
 
     def _on_pick_pose(self, msg):
         self.pick_pose = msg
@@ -83,17 +83,26 @@ class UR7e_CubeGrasp(Node):
         with self._js_lock:
             self.joint_state = msg
 
+    def _drain_queue(self):
+        while True:
+            fn, done, result = self._cmd_queue.get()
+            if fn is None:
+                break
+            result[0] = fn()
+            done.set()
+
+    def _submit(self, fn) -> bool:
+        done   = threading.Event()
+        result = [False]
+        self._cmd_queue.put((fn, done, result))
+        done.wait()
+        return result[0]
+
     def _handle_scan_pose(self, _request, response):
         x, y, z = SCAN_POSES[self._scan_idx % len(SCAN_POSES)]
         self._scan_idx += 1
         print(f'[SCAN] Moving to ({x:.3f}, {y:.3f}, {z:.3f})', flush=True)
-        with self._js_lock:
-            js = self.joint_state
-        if js is None:
-            print('[SCAN] FAIL — no joint state received yet', flush=True)
-            return self._fail(response, 'no joint state')
-        print(f'[SCAN] Joint state OK, calling IK...', flush=True)
-        ok = self._move_to(x, y, z, speed=SPEED_FAST)
+        ok = self._submit(lambda: self._cmd_scan(x, y, z))
         print(f'[SCAN] Move result: {ok}', flush=True)
         return self._result(response, ok, 'scan_pose')
 
@@ -101,49 +110,67 @@ class UR7e_CubeGrasp(Node):
         if self.pick_pose is None:
             return self._fail(response, 'No pick pose received')
         p = self.pick_pose.pose
-        ok = self._move_to(p.position.x, p.position.y, p.position.z + self.PRE_GRASP_OFFSET,
-                           p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w,
-                           speed=SPEED_MED)
+        ok = self._submit(lambda: self._cmd_pregrasp(p))
         return self._result(response, ok, 'pregrasp')
 
     def _handle_grasp(self, _request, response):
         if self.pick_pose is None:
             return self._fail(response, 'No pick pose received')
         p = self.pick_pose.pose
-        ox, oy, oz, ow = p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w
-
-        ok = (self._toggle_gripper()
-              and self._move_to(p.position.x, p.position.y, p.position.z + self.GRASP_OFFSET,
-                                ox, oy, oz, ow, speed=SPEED_SLOW)
-              and self._toggle_gripper()
-              and self._move_to(p.position.x, p.position.y, p.position.z + self.PRE_GRASP_OFFSET,
-                                ox, oy, oz, ow, speed=SPEED_MED))
+        ok = self._submit(lambda: self._cmd_grasp(p))
         return self._result(response, ok, 'grasp')
 
     def _handle_check(self, _request, response):
-        ok = self._move_to(CHECK_X, CHECK_Y, CHECK_Z, speed=SPEED_FAST)
+        ok = self._submit(lambda: self._move(CHECK_X, CHECK_Y, CHECK_Z, vel=0.15, accel=0.15))
         return self._result(response, ok, 'move_to_check')
 
     def _handle_place(self, _request, response):
         if self.place_pose is None:
             return self._fail(response, 'No place pose received')
         p = self.place_pose.pose
-        ox, oy, oz, ow = p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w
-
-        ok = (self._move_to(p.position.x, p.position.y, p.position.z + self.PRE_PLACE_OFFSET,
-                            ox, oy, oz, ow, speed=SPEED_MED)
-              and self._move_to(p.position.x, p.position.y, p.position.z + self.PLACE_OFFSET,
-                                ox, oy, oz, ow, speed=SPEED_SLOW)
-              and self._toggle_gripper()
-              and self._move_to(p.position.x, p.position.y, p.position.z + self.PRE_PLACE_OFFSET,
-                                ox, oy, oz, ow, speed=SPEED_MED))
+        ok = self._submit(lambda: self._cmd_place(p))
         return self._result(response, ok, 'place')
 
-    def _move_to(self, x, y, z, qx=0.0, qy=1.0, qz=0.0, qw=0.0, speed=SPEED_MED) -> bool:
-        with self._motion_lock:
-            return self._move_to_locked(x, y, z, qx, qy, qz, qw, speed)
+    def _cmd_scan(self, x, y, z) -> bool:
+        with self._js_lock:
+            js = self.joint_state
+        if js is None:
+            print('[SCAN] FAIL — no joint state received yet', flush=True)
+            return False
+        return self._move(x, y, z, vel=0.1, accel=0.1)
 
-    def _move_to_locked(self, x, y, z, qx=0.0, qy=1.0, qz=0.0, qw=0.0, speed=SPEED_MED) -> bool:
+    def _cmd_pregrasp(self, p) -> bool:
+        return self._move(
+            p.position.x, p.position.y, p.position.z + self.PRE_GRASP_OFFSET,
+            p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w,
+            vel=0.1, accel=0.1,
+        )
+
+    def _cmd_grasp(self, p) -> bool:
+        ox, oy, oz, ow = p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w
+        return (
+            self._toggle_gripper()
+            and self._move(p.position.x, p.position.y, p.position.z + self.GRASP_OFFSET,
+                           ox, oy, oz, ow, vel=0.05, accel=0.05)
+            and self._toggle_gripper()
+            and self._move(p.position.x, p.position.y, p.position.z + self.PRE_GRASP_OFFSET,
+                           ox, oy, oz, ow, vel=0.1, accel=0.1)
+        )
+
+    def _cmd_place(self, p) -> bool:
+        ox, oy, oz, ow = p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w
+        return (
+            self._move(p.position.x, p.position.y, p.position.z + self.PRE_PLACE_OFFSET,
+                       ox, oy, oz, ow, vel=0.1, accel=0.1)
+            and self._move(p.position.x, p.position.y, p.position.z + self.PLACE_OFFSET,
+                           ox, oy, oz, ow, vel=0.05, accel=0.05)
+            and self._toggle_gripper()
+            and self._move(p.position.x, p.position.y, p.position.z + self.PRE_PLACE_OFFSET,
+                           ox, oy, oz, ow, vel=0.1, accel=0.1)
+        )
+
+    def _move(self, x, y, z, qx=0.0, qy=1.0, qz=0.0, qw=0.0,
+              vel=0.1, accel=0.1) -> bool:
         with self._js_lock:
             js = self.joint_state
         if js is None:
@@ -154,39 +181,11 @@ class UR7e_CubeGrasp(Node):
         if joint_sol is None:
             return False
 
-        traj = self.ik_planner.plan_to_joints(joint_sol, speed=speed)
+        traj = self.ik_planner.plan_to_joints(joint_sol, vel, accel)
         if traj is None:
             return False
 
-        jt = traj.joint_trajectory
-        self._interpolate_waypoints(jt)
-        return self._execute_traj(jt)
-
-    def _interpolate_waypoints(self, joint_traj) -> None:
-        from builtin_interfaces.msg import Duration as RosDuration
-        from trajectory_msgs.msg import JointTrajectoryPoint
-
-        pts = joint_traj.points
-        if len(pts) < 2:
-            return
-
-        new_pts = []
-        for i in range(len(pts) - 1):
-            a, b = pts[i], pts[i + 1]
-            new_pts.append(a)
-
-            mid = JointTrajectoryPoint()
-            mid.positions     = [(float(a.positions[j])     + float(b.positions[j]))     / 2.0 for j in range(len(a.positions))]
-            mid.velocities    = [(float(a.velocities[j])    + float(b.velocities[j]))    / 2.0 for j in range(len(a.velocities))]    if a.velocities    else []
-            mid.accelerations = [(float(a.accelerations[j]) + float(b.accelerations[j])) / 2.0 for j in range(len(a.accelerations))] if a.accelerations else []
-            t_a = a.time_from_start.sec + a.time_from_start.nanosec * 1e-9
-            t_b = b.time_from_start.sec + b.time_from_start.nanosec * 1e-9
-            t_m = (t_a + t_b) / 2.0
-            mid.time_from_start = RosDuration(sec=int(t_m), nanosec=int(round((t_m - int(t_m)) * 1e9)))
-            new_pts.append(mid)
-
-        new_pts.append(pts[-1])
-        joint_traj.points = new_pts
+        return self._execute_traj(traj.joint_trajectory)
 
     def _execute_traj(self, joint_traj) -> bool:
         done    = threading.Event()
@@ -250,9 +249,11 @@ def main(args=None):
     node = UR7e_CubeGrasp()
     executor = MultiThreadedExecutor()
     executor.add_node(node)
+    executor.add_node(node.ik_planner)
     try:
         executor.spin()
     finally:
+        node._cmd_queue.put((None, None, None))
         node.destroy_node()
         rclpy.shutdown()
 
