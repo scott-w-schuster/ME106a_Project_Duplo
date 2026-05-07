@@ -82,45 +82,16 @@ body { display: flex; height: 100vh; overflow: hidden; font-family: 'Segoe UI', 
 
 <div id="sidebar">
   <h1>LEGO Builder</h1>
-  <div class="section-label">Block Palette</div>
+  
+  <div class="section-label">Inventory</div>
+  <div id="inventory-container" style="display: flex; flex-direction: column; gap: 10px;"></div>
 
-  <div class="block-card" data-key="blue-2x4" data-type="2x4" data-color="blue">
-    <div class="block-swatch" style="width:38px;background:#2B7FE5;"></div>
-    <div class="block-info">
-      <div class="block-name">Blue 2×4</div>
-      <div class="block-count" id="cnt-blue-2x4">5 left</div>
-    </div>
-  </div>
-
-  <div class="block-card" data-key="blue-2x2" data-type="2x2" data-color="blue">
-    <div class="block-swatch" style="width:20px;background:#2B7FE5;"></div>
-    <div class="block-info">
-      <div class="block-name">Blue 2×2</div>
-      <div class="block-count" id="cnt-blue-2x2">5 left</div>
-    </div>
-  </div>
-
-  <div class="block-card" data-key="yellow-2x4" data-type="2x4" data-color="yellow">
-    <div class="block-swatch" style="width:38px;background:#F5C518;"></div>
-    <div class="block-info">
-      <div class="block-name">Yellow 2×4</div>
-      <div class="block-count" id="cnt-yellow-2x4">5 left</div>
-    </div>
-  </div>
-
-  <div class="block-card" data-key="yellow-2x2" data-type="2x2" data-color="yellow">
-    <div class="block-swatch" style="width:20px;background:#F5C518;"></div>
-    <div class="block-info">
-      <div class="block-name">Yellow 2×2</div>
-      <div class="block-count" id="cnt-yellow-2x2">5 left</div>
-    </div>
-  </div>
-
-  <div class="section-label">Controls</div>
-  <div class="controls-box">
-    <b>Drag</b> block onto plate<br>
-    <b>R</b> rotate while dragging<br>
-    <b>Click</b> placed block → select<br>
+  <div class="section-label" style="margin-top: 15px;">Controls</div>
+  <div style="font-size: 11px; color: #8b949e; line-height: 1.6; margin-top: 4px;">
+    <b>Click card</b> to equip block<br>
+    <b>Click grid</b> to place block<br>
+    <b>R</b> rotate while placing<br>
+    <b>Click placed</b> to select it<br>
     <b>R</b> rotate selected block<br>
     <b>Delete</b> remove selected<br>
     <b>Esc</b> cancel / deselect<br>
@@ -128,9 +99,10 @@ body { display: flex; height: 100vh; overflow: hidden; font-family: 'Segoe UI', 
     <b>Scroll</b> zoom
   </div>
 
-  <div class="spacer"></div>
-  <button class="btn btn-green" id="btn-export">Export Build Plan</button>
-  <button class="btn btn-red" id="btn-reset">Reset Build</button>
+  <div style="flex-grow: 1;"></div>
+  
+  <button class="btn btn-export" id="btn-export">Export Build Plan</button>
+  <button class="btn btn-reset" id="btn-reset">Reset Build</button>
 </div>
 
 <div id="canvas-container">
@@ -155,21 +127,77 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 // ── CONSTANTS ────────────────────────────────────────────────────────────────
 const GRID = 20;
-const BH   = 1.2;   // block height world units
+const VU   = 0.6;   // 1 Vertical Unit = 0.6 world units (half a standard brick)
 const SR   = 0.18;  // stud radius
 const SH   = 0.2;   // stud height
 
-const BLOCK_DIMS = { '2x4': { w: 2, d: 4 }, '2x2': { w: 2, d: 2 } };
-const COLOR_HEX  = { blue: 0x2B7FE5, yellow: 0xF5C518 };
-const COLOR_DARK = { blue: 0x1a5aaa, yellow: 0xc09a10 };
+const BLOCK_DIMS = { 
+  // Standard Boxes
+  '2x4': { w: 2, d: 4, h: 2, shape: 'box' }, 
+  '2x2': { w: 2, d: 2, h: 2, shape: 'box' },
+  '2x4-half': { w: 2, d: 4, h: 1, shape: 'box' },
+  '2x6-half': { w: 2, d: 6, h: 1, shape: 'box' },
+  '1x2-double': { w: 1, d: 2, h: 4, shape: 'box' },
+  
+  // Weird Shapes
+  '2x2-cylinder': { w: 2, d: 2, h: 4, shape: 'cylinder' },
+  '2x3-fillet-top': { w: 2, d: 3, h: 2, shape: 'fillet-top-end' },
+  '2x4-fillet-top-both': { w: 2, d: 4, h: 2, shape: 'fillet-top-both' },
+  '2x4-fillet-bot-both': { w: 2, d: 4, h: 2, shape: 'fillet-bot-both' }
+};
+const COLOR_HEX = { 
+  red: 0xdb2a2a, orange: 0xe8871e, pink: 0xe559a4, yellow: 0xF5C518, 
+  blue: 0x2B7FE5, white: 0xf4f4f4, green: 0x249630, lime: 0x8bd638, 
+  purple: 0x7c2da5, skyblue: 0x6abcf2, lightblue: 0x9cd3f5, brown: 0x6e4221 
+};
+
+const COLOR_DARK = { 
+  red: 0xa81c1c, orange: 0xb56510, pink: 0xb33d7d, yellow: 0xc09a10, 
+  blue: 0x1a5aaa, white: 0xcccccc, green: 0x17661f, lime: 0x67a822, 
+  purple: 0x561d75, skyblue: 0x4890c2, lightblue: 0x7aaed1, brown: 0x4a2a12 
+};
+
+const hexCSS = (num) => '#' + num.toString(16).padStart(6, '0');
 
 // ── HELPERS ──────────────────────────────────────────────────────────────────
-const gW = g => g - GRID / 2 + 0.5;          // grid index → world center
-const wG = w => Math.round(w + GRID / 2 - 0.5); // world → nearest grid index
+const gW = g => g - GRID / 2 + 0.5;
+const wG = w => Math.round(w + GRID / 2 - 0.5);
 
 function dims(type, rot) {
   const b = BLOCK_DIMS[type];
-  return (rot % 2 === 1) ? { w: b.d, d: b.w } : { w: b.w, d: b.d };
+  
+  // Safety net to prevent fatal crashes if a block type gets lost
+  if (!b) {
+    console.error("Critical: Unknown block type requested:", type);
+    return { w: 1, d: 1, h: 1, shape: 'box', rawW: 1, rawD: 1 }; 
+  }
+  
+  const isRot = rot % 2 === 1;
+  return { 
+    w: isRot ? b.d : b.w, 
+    d: isRot ? b.w : b.d, 
+    h: b.h, 
+    shape: b.shape, 
+    rawW: b.w, 
+    rawD: b.d 
+  };
+}
+
+// ── CONNECTION LOGIC ──────────────────────────────────────────────────────────
+function hasTopStud(type, rot, localX, localZ) {
+  const { w, d, shape } = dims(type, rot);
+  
+  if (shape === 'fillet-top-end') {
+    if (rot === 0 && localZ === 0) return false;
+    if (rot === 1 && localX === w - 1) return false;
+    if (rot === 2 && localZ === d - 1) return false;
+    if (rot === 3 && localX === 0) return false;
+  } 
+  else if (shape === 'fillet-top-both') {
+    if (rot % 2 === 0 && (localZ === 0 || localZ === d - 1)) return false;
+    if (rot % 2 === 1 && (localX === 0 || localX === w - 1)) return false;
+  }
+  return true; // Boxes, cylinders, and bot-fillets have all top studs
 }
 
 function cells(gx, gz, type, rot) {
@@ -180,8 +208,29 @@ function cells(gx, gz, type, rot) {
 }
 
 // ── STATE ────────────────────────────────────────────────────────────────────
-const inventory = { 'blue-2x4': 5, 'blue-2x2': 5, 'yellow-2x4': 5, 'yellow-2x2': 5 };
-const placed    = [];                    // block records
+const initialInventory = {
+  // 2x2 Bricks
+  'red-2x2': 4, 'orange-2x2': 2, 'pink-2x2': 2, 'yellow-2x2': 6, 
+  'blue-2x2': 4, 'white-2x2': 4, 'green-2x2': 3, 'lime-2x2': 2, 
+  'purple-2x2': 1, 'skyblue-2x2': 1,
+  // 2x4 Bricks
+  'yellow-2x4': 1, 'blue-2x4': 1, 'red-2x4': 1,
+  // Custom Shapes
+  'yellow-2x4-fillet-top-both': 1, 'green-2x4-fillet-top-both': 1,
+  'green-2x4-fillet-bot-both': 1,
+  'blue-2x3-fillet-top': 2, 'white-2x3-fillet-top': 1,
+  'brown-2x2-cylinder': 1,
+  // Half Heights
+  'yellow-2x4-half': 1, 'white-2x4-half': 1, 'lightblue-2x4-half': 1, 'green-2x4-half': 1,
+  'white-2x6-half': 1,
+  // Double Heights
+  'lightblue-1x2-double': 2, 'blue-1x2-double': 2, 'yellow-1x2-double': 2
+};
+
+// Copy initial state into active tracking state
+const inventory = { ...initialInventory };
+
+const placed    = [];
 const occ       = {};                    // `x,z,layer` → id
 let   uid       = 0;
 const newId     = () => `b${uid++}`;
@@ -197,6 +246,88 @@ let lastMx      = 0, lastMy = 0;
 let activeCard  = null;
 
 let selectedId  = null;
+
+// ── UI GENERATOR ──────────────────────────────────────────────────────────────
+function renderSidebar() {
+  const container = document.getElementById('inventory-container');
+  container.innerHTML = ''; 
+
+  const grouped = {};
+  for (const key in inventory) {
+    const firstDash = key.indexOf('-');
+    const color = key.substring(0, firstDash);
+    const type = key.substring(firstDash + 1);
+    if (!grouped[type]) grouped[type] = [];
+    grouped[type].push(color);
+  }
+
+  for (const type in grouped) {
+    const colors = grouped[type];
+    const defaultColor = colors[0]; 
+    const { shape } = dims(type, 0);
+
+    let rStyle = 'border-radius: 3px;';
+    if (shape === 'cylinder') rStyle = 'border-radius: 10px;';
+    if (shape === 'fillet-top-both') rStyle = 'border-top-left-radius: 10px; border-top-right-radius: 10px;';
+    if (shape === 'fillet-bot-both') rStyle = 'border-bottom-left-radius: 10px; border-bottom-right-radius: 10px;';
+    if (shape === 'fillet-top-end') rStyle = 'border-top-right-radius: 10px;';
+
+    const div = document.createElement('div');
+    div.className = 'block-card';
+    div.id = `card-${type}`;
+    div.dataset.type = type;
+    div.dataset.color = defaultColor;
+
+    const optionsHtml = colors.map(c => 
+      `<option value="${c}">${c.charAt(0).toUpperCase() + c.slice(1)}</option>`
+    ).join('');
+
+    div.innerHTML = `
+      <div class="block-swatch" id="swatch-${type}" style="width: 32px; height: 16px; background: ${hexCSS(COLOR_HEX[defaultColor])}; ${rStyle}"></div>
+      <div class="block-info">
+        <select class="color-select" style="margin-bottom: 2px; width: 100%; background: #0d1117; color: #e6edf3; border: 1px solid #30363d; border-radius: 4px;">
+          ${optionsHtml}
+        </select>
+        <div class="block-name">${type}</div>
+        <div class="block-count" id="cnt-${type}">${inventory[`${defaultColor}-${type}`]} left</div>
+      </div>
+    `;
+
+    container.appendChild(div);
+
+    // Dropdown Change Listener
+    const select = div.querySelector('.color-select');
+    select.addEventListener('change', (e) => {
+      const selectedColor = e.target.value;
+      div.dataset.color = selectedColor; 
+      document.getElementById(`swatch-${type}`).style.background = hexCSS(COLOR_HEX[selectedColor]);
+      
+      const currentCount = inventory[`${selectedColor}-${type}`];
+      document.getElementById(`cnt-${type}`).innerText = `${currentCount} left`;
+      div.style.opacity = currentCount <= 0 ? '0.4' : '1.0';
+      
+      if (currentCount > 0) {
+        clearSelection();
+        dragType = type; // ✅ Bulletproof closure variable
+        dragColor = selectedColor;
+        dragRot = 0;
+        setStatus(`Tool: ${dragColor} ${dragType}`);
+        
+        document.querySelectorAll('.block-card').forEach(c => c.style.borderColor = '#30363d');
+        div.style.borderColor = '#58a6ff';
+        if (ghostGroup) moveGhost(); 
+      }
+    });
+
+    select.addEventListener('mousedown', e => e.stopPropagation());
+    
+    // Card Click Listener
+    div.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      startDrag(div);
+    });
+  }
+}
 
 // ── THREE.JS ─────────────────────────────────────────────────────────────────
 const scene    = new THREE.Scene();
@@ -263,39 +394,110 @@ groundPlane.rotation.x = -Math.PI / 2;
 groundPlane.userData.isGround = true;
 scene.add(groundPlane);
 
+// ── CUSTOM GEOMETRY BUILDER ──────────────────────────────────────────────────
+function createBodyGeometry(shape, w, d, bodyH, rot) {
+  if (shape === 'box') return new THREE.BoxGeometry(w, bodyH, d);
+  
+  if (shape === 'cylinder') {
+    // 2x2 means diameter is 2, so radius is 1
+    const radius = Math.min(w, d) / 2;
+    return new THREE.CylinderGeometry(radius, radius, bodyH, 32);
+  }
+
+  if (shape.includes('fillet')) {
+    const isRotated = rot % 2 === 1;
+    const profileD = isRotated ? w : d;  // The depth of our 2D sketch
+    const extrudeW = isRotated ? d : w;  // How far we extrude it
+
+    const s = new THREE.Shape();
+    
+    if (shape === 'fillet-top-end') {
+      s.moveTo(0, 0);
+      s.lineTo(profileD, 0); // bottom flat
+      s.lineTo(profileD, bodyH - 1); // back wall up
+      s.quadraticCurveTo(profileD, bodyH, profileD - 1, bodyH); // top right curve
+      s.lineTo(0, bodyH); // top flat (for studs)
+      s.lineTo(0, 0); // front down
+    } 
+    else if (shape === 'fillet-top-both') {
+      s.moveTo(0, 0);
+      s.lineTo(profileD, 0); // bottom flat
+      s.lineTo(profileD, bodyH - 1); 
+      s.quadraticCurveTo(profileD, bodyH, profileD - 1, bodyH); // right curve
+      s.lineTo(1, bodyH); // top flat middle
+      s.quadraticCurveTo(0, bodyH, 0, bodyH - 1); // left curve
+      s.lineTo(0, 0); 
+    } 
+    else if (shape === 'fillet-bot-both') {
+      // Fillets on the bottom replace the 'holes'
+      s.moveTo(1, 0);
+      s.lineTo(profileD - 1, 0); // bottom flat middle
+      s.quadraticCurveTo(profileD, 0, profileD, 1); // bottom right curve
+      s.lineTo(profileD, bodyH); // straight up
+      s.lineTo(0, bodyH); // flat top (all studs exist here)
+      s.lineTo(0, 1); // straight down
+      s.quadraticCurveTo(0, 0, 1, 0); // bottom left curve
+    }
+
+    const geo = new THREE.ExtrudeGeometry(s, { depth: extrudeW, bevelEnabled: false });
+    
+    // Extrude builds along Z. We rotate and align it to match standard BoxGeometry
+    geo.rotateY(Math.PI / 2); 
+    geo.translate(-extrudeW / 2, -bodyH / 2, profileD / 2);
+
+    // Apply the block's physical rotation
+    if (isRotated) geo.rotateY(-Math.PI / 2);
+
+    return geo;
+  }
+}
+
 // ── BRICK MESH FACTORY ───────────────────────────────────────────────────────
 function makeBrick(type, color, rot, { ghost = false, invalid = false } = {}) {
-  const { w, d } = dims(type, rot);
-  const bodyH    = BH - SH;
-  const group    = new THREE.Group();
+  const { w, d, h, shape } = dims(type, rot);
+  const totalH = h * VU;     
+  const bodyH  = totalH - SH; 
+  const group  = new THREE.Group();
 
   const baseColor = invalid ? 0xff2222 : COLOR_HEX[color];
   const darkColor = invalid ? 0xaa1111 : COLOR_DARK[color];
   const opacity   = ghost ? 0.52 : 1.0;
   const trans     = ghost || invalid;
 
+  // 1. Generate Custom Body Geometry
   const bodyMat = new THREE.MeshLambertMaterial({ color: baseColor, transparent: trans, opacity });
-  const body    = new THREE.Mesh(new THREE.BoxGeometry(w, bodyH, d), bodyMat);
+  const bodyGeo = createBodyGeometry(shape, w, d, bodyH, rot);
+  const body    = new THREE.Mesh(bodyGeo, bodyMat);
   body.position.y  = bodyH / 2;
   body.castShadow  = !ghost;
   body.receiveShadow = true;
   group.add(body);
   group.userData.bodyMesh = body;
 
-  if (!ghost) {
+  // Only draw the dark edge detail loop if it's a standard box
+  if (!ghost && shape === 'box') {
     const edgeMat = new THREE.MeshLambertMaterial({ color: darkColor });
     const edge    = new THREE.Mesh(new THREE.BoxGeometry(w - 0.06, 0.1, d - 0.06), edgeMat);
     edge.position.y = 0.05;
     group.add(edge);
   }
 
+  // 2. Generate Studs with a "Stud Mask"
   const studMat = new THREE.MeshLambertMaterial({ color: darkColor, transparent: trans, opacity });
   const studGeo = new THREE.CylinderGeometry(SR, SR, SH, 8);
-  for (let sx = 0; sx < w; sx++) for (let sz = 0; sz < d; sz++) {
-    const s = new THREE.Mesh(studGeo, studMat);
-    s.position.set(sx - w / 2 + 0.5, bodyH + SH / 2, sz - d / 2 + 0.5);
-    s.castShadow = !ghost;
-    group.add(s);
+  
+  for (let sx = 0; sx < w; sx++) {
+    for (let sz = 0; sz < d; sz++) {
+      
+      let hasStud = hasTopStud(type, rot, sx, sz);
+
+      if (hasStud) {
+        const s = new THREE.Mesh(studGeo, studMat);
+        s.position.set(sx - w / 2 + 0.5, bodyH + SH / 2, sz - d / 2 + 0.5);
+        s.castShadow = !ghost;
+        group.add(s);
+      }
+    }
   }
 
   return group;
@@ -359,16 +561,41 @@ function placementAt(cx, cy) {
 // ── VALIDATION ────────────────────────────────────────────────────────────────
 function isValid(gx, gz, type, rot, ly, excludeId = null) {
   const cs = cells(gx, gz, type, rot);
+  const { h } = dims(type, rot);
+
+  // 1. Check grid bounds and 3D physical overlap
   for (const [x, z] of cs) {
     if (x < 0 || x >= GRID || z < 0 || z >= GRID) return false;
-    const key = `${x},${z},${ly}`;
-    if (occ[key] !== undefined && occ[key] !== excludeId) return false;
-  }
-  if (ly > 0) {
-    for (const [x, z] of cs) {
-      if (!occ[`${x},${z},${ly - 1}`]) return false;
+    
+    for (let i = 0; i < h; i++) {
+      const key = `${x},${z},${ly + i}`;
+      if (occ[key] !== undefined && occ[key] !== excludeId) return false;
     }
   }
+  
+  // 2. Check Connection Mechanics (Support and Studs)
+  if (ly > 0) {
+    for (const [x, z] of cs) {
+      const belowId = occ[`${x},${z},${ly - 1}`];
+      
+      // Prevent overhangs or resting on the ghost block itself
+      if (belowId === undefined || belowId === excludeId) return false; 
+
+      // Check if the block below actually provides a stud
+      const belowBlock = placed.find(p => p.id === belowId);
+      if (belowBlock) {
+        // Calculate the relative coordinate on the block below
+        const bsx = x - belowBlock.gx;
+        const bsz = z - belowBlock.gz;
+        
+        if (!hasTopStud(belowBlock.type, belowBlock.rot, bsx, bsz)) {
+          return false; // Trying to place onto a smooth slope!
+        }
+      }
+      
+    }
+  }
+  
   return true;
 }
 
@@ -400,7 +627,7 @@ function moveGhost(cx, cy) {
   const { w, d } = dims(dragType, dragRot);
   if (!ghostGroup) createGhost();
   ghostGroup.visible = true;
-  ghostGroup.position.set(gW(p.gx) + (w - 1) / 2, p.ly * BH, gW(p.gz) + (d - 1) / 2);
+  ghostGroup.position.set(gW(p.gx) + (w - 1) / 2, p.ly * VU, gW(p.gz) + (d - 1) / 2);
   updateGhostColor(ghostValid);
 }
 
@@ -410,17 +637,22 @@ function placeBlock() {
   const key = `${dragColor}-${dragType}`;
   if (inventory[key] <= 0) { setStatus('No blocks of this type left'); return; }
 
-  const { w, d } = dims(dragType, dragRot);
+  const { w, d, h } = dims(dragType, dragRot);
   const id   = newId();
   const cs   = cells(ghostGx, ghostGz, dragType, dragRot);
   const mesh = makeBrick(dragType, dragColor, dragRot);
-  mesh.position.set(gW(ghostGx) + (w - 1) / 2, ghostLy * BH, gW(ghostGz) + (d - 1) / 2);
+  
+  mesh.position.set(gW(ghostGx) + (w - 1) / 2, ghostLy * VU, gW(ghostGz) + (d - 1) / 2);
   mesh.userData.bodyMesh.userData.blockId = id;
   scene.add(mesh);
 
-  cs.forEach(([x, z]) => { occ[`${x},${z},${ghostLy}`] = id; });
+  // Claim all vertical layers
+  for (let i = 0; i < h; i++) {
+    cs.forEach(([x, z]) => { occ[`${x},${z},${ghostLy + i}`] = id; });
+  }
 
-  placed.push({ id, type: dragType, color: dragColor, gx: ghostGx, gz: ghostGz, ly: ghostLy, rot: dragRot, mesh, bodyMesh: mesh.userData.bodyMesh, cells: cs });
+  // Store 'h' in the placed record so we can easily delete it later
+  placed.push({ id, type: dragType, color: dragColor, gx: ghostGx, gz: ghostGz, ly: ghostLy, h, rot: dragRot, mesh, bodyMesh: mesh.userData.bodyMesh, cells: cs });
   inventory[key]--;
   refreshInventory();
   setStatus(`Placed ${dragColor} ${dragType} at layer ${ghostLy}`);
@@ -428,17 +660,28 @@ function placeBlock() {
 
 // ── DELETE BLOCK ──────────────────────────────────────────────────────────────
 function deleteBlock(id) {
-  const idx = placed.findIndex(b => b.id === id);
+  // Find the exact index of the block we want to delete
+  const idx = placed.findIndex(p => p.id === id);
   if (idx === -1) return;
+  
   const b = placed[idx];
 
-  // Check nothing rests on it
+  // Check nothing rests on top of its HIGHEST layer
+  const topLy = b.ly + b.h;
   for (const [x, z] of b.cells) {
-    if (occ[`${x},${z},${b.ly + 1}`]) { setStatus('Cannot delete — blocks rest on top of this one'); return; }
+    if (occ[`${x},${z},${topLy}`]) { 
+      setStatus('Cannot delete — blocks rest on top of this one'); 
+      return; 
+    }
   }
 
   scene.remove(b.mesh);
-  b.cells.forEach(([x, z]) => delete occ[`${x},${z},${b.ly}`]);
+  
+  // Free all vertical layers
+  for (let i = 0; i < b.h; i++) {
+    b.cells.forEach(([x, z]) => delete occ[`${x},${z},${b.ly + i}`]);
+  }
+  
   inventory[`${b.color}-${b.type}`]++;
   placed.splice(idx, 1);
   if (selectedId === id) clearSelection();
@@ -482,37 +725,69 @@ function rotatePlaced(id) {
   const ngz = Math.round(cz - (nd - 1) / 2);
 
   // Temporarily free cells
-  b.cells.forEach(([x, z]) => delete occ[`${x},${z},${b.ly}`]);
+  for (let i = 0; i < b.h; i++) {
+    b.cells.forEach(([x, z]) => delete occ[`${x},${z},${b.ly + i}`]);
+  }
 
   if (isValid(ngx, ngz, b.type, newRot, b.ly)) {
+    // 1. Remove old mesh
     scene.remove(b.mesh);
-    b.rot = newRot; b.gx = ngx; b.gz = ngz;
+    
+    // 2. Generate new mesh with new rotation
+    const newMesh = makeBrick(b.type, b.color, newRot);
+    newMesh.position.set(gW(ngx) + (nw - 1) / 2, b.ly * VU, gW(ngz) + (nd - 1) / 2);
+    newMesh.userData.bodyMesh.userData.blockId = b.id;
+    scene.add(newMesh);
+
+    // 3. Update the block's internal state
+    b.mesh = newMesh;
+    b.bodyMesh = newMesh.userData.bodyMesh;
+    b.gx = ngx;
+    b.gz = ngz;
+    b.rot = newRot;
     b.cells = cells(ngx, ngz, b.type, newRot);
-    const m = makeBrick(b.type, b.color, newRot);
-    m.position.set(gW(ngx) + (nw - 1) / 2, b.ly * BH, gW(ngz) + (nd - 1) / 2);
-    m.userData.bodyMesh.userData.blockId = b.id;
-    b.mesh = m; b.bodyMesh = m.userData.bodyMesh;
-    scene.add(m);
-    b.cells.forEach(([x, z]) => { occ[`${x},${z},${b.ly}`] = b.id; });
-    selectBlock(b.id);
-    setStatus(`Rotated to ${newRot * 90}°`);
+
+    // 4. Re-claim the newly rotated cells
+    for (let i = 0; i < b.h; i++) {
+      b.cells.forEach(([x, z]) => { occ[`${x},${z},${b.ly + i}`] = b.id; });
+    }
+    
+    // Re-highlight the newly created mesh
+    selectBlock(b.id); 
+    setStatus('Block rotated');
+
   } else {
-    // Restore
-    b.cells.forEach(([x, z]) => { occ[`${x},${z},${b.ly}`] = b.id; });
-    setStatus('Cannot rotate — not enough space or would overhang');
+    // Restore original cells if rotation is blocked
+    for (let i = 0; i < b.h; i++) {
+      b.cells.forEach(([x, z]) => { occ[`${x},${z},${b.ly + i}`] = b.id; });
+    }
+    setStatus('Cannot rotate — space occupied or out of bounds');
   }
 }
 
 // ── UI HELPERS ────────────────────────────────────────────────────────────────
 function setStatus(msg) { document.getElementById('status').textContent = msg; }
 
+// ── REFRESH INVENTORY UI ──────────────────────────────────────────────────────
 function refreshInventory() {
-  for (const key of Object.keys(inventory)) {
-    const el = document.getElementById(`cnt-${key}`);
-    if (el) el.textContent = `${inventory[key]} left`;
-    const card = document.querySelector(`.block-card[data-key="${key}"]`);
-    if (card) card.classList.toggle('empty', inventory[key] <= 0);
-  }
+  document.querySelectorAll('.block-card').forEach(card => {
+    const type = card.dataset.type;
+    const activeColor = card.dataset.color; // What color is the dropdown currently showing?
+    const count = inventory[`${activeColor}-${type}`];
+    
+    const countLabel = document.getElementById(`cnt-${type}`);
+    if (countLabel) countLabel.innerText = `${count} left`;
+    
+    if (count <= 0) {
+      card.style.opacity = '0.4';
+      if (dragType === type && dragColor === activeColor) {
+        dragType = null; // Auto-deselect if they run out
+        card.style.borderColor = '#30363d';
+      }
+    } else {
+      card.style.opacity = '1.0';
+    }
+  });
 }
 
 function showRotBadge(deg) {
@@ -527,8 +802,16 @@ function hideRotBadge() {
 
 // ── DRAG FROM PALETTE ─────────────────────────────────────────────────────────
 function startDrag(card) {
-  const key = card.dataset.key;
-  if (inventory[key] <= 0) return;
+  // Construct the key dynamically from the dataset
+  const key = `${card.dataset.color}-${card.dataset.type}`;
+  
+  if (inventory[key] <= 0) {
+    setStatus(`No more ${card.dataset.color} ${card.dataset.type} blocks left!`);
+    return;
+  }
+  
+  clearSelection();
+  
   dragging   = true;
   dragType   = card.dataset.type;
   dragColor  = card.dataset.color;
@@ -539,6 +822,10 @@ function startDrag(card) {
   createGhost();
   showRotBadge(0);
   setStatus('Move over plate to position · R to rotate · release to place · Esc to cancel');
+  
+  // Highlight the active tool in the sidebar
+  document.querySelectorAll('.block-card').forEach(c => c.style.borderColor = '#30363d');
+  card.style.borderColor = '#58a6ff';
 }
 
 function endDrag(place) {
@@ -553,12 +840,6 @@ function endDrag(place) {
 }
 
 // ── EVENTS ────────────────────────────────────────────────────────────────────
-document.querySelectorAll('.block-card').forEach(card => {
-  card.addEventListener('mousedown', e => {
-    e.preventDefault();
-    startDrag(card);
-  });
-});
 
 document.addEventListener('mousemove', e => {
   lastMx = e.clientX; lastMy = e.clientY;
@@ -646,7 +927,7 @@ document.getElementById('btn-export').addEventListener('click', () => {
       created_at: new Date().toISOString(),
       tool: 'LEGO Builder – Robot Arm Planner',
       coordinate_system: 'right_handed_y_up',
-      units: { xy_studs: 1.0, height: BH, description: '1 world unit = 1 LEGO stud pitch' },
+      units: { xy_studs: 1.0, height: VU, description: '1 world unit = 1 LEGO stud pitch' },
       grid_origin: 'center of build plate',
       grid_size: GRID
     },
@@ -663,7 +944,7 @@ document.getElementById('btn-export').addEventListener('click', () => {
     build_sequence: sorted.map((b, i) => {
       const { w, d } = dims(b.type, b.rot);
       const wx = parseFloat((gW(b.gx) + (w - 1) / 2).toFixed(4));
-      const wy = parseFloat((b.ly * BH + BH / 2).toFixed(4));
+      const wy = parseFloat((b.ly * VU + VU / 2).toFixed(4));
       const wz = parseFloat((gW(b.gz) + (d - 1) / 2).toFixed(4));
       return {
         step: i + 1,
@@ -678,8 +959,8 @@ document.getElementById('btn-export').addEventListener('click', () => {
         world_footprint: {
           x_min: parseFloat((gW(b.gx) - 0.5).toFixed(4)),
           x_max: parseFloat((gW(b.gx) + w - 0.5).toFixed(4)),
-          y_bottom: parseFloat((b.ly * BH).toFixed(4)),
-          y_top: parseFloat(((b.ly + 1) * BH).toFixed(4)),
+          y_bottom: parseFloat((b.ly * VU).toFixed(4)),
+          y_top: parseFloat(((b.ly + 1) * VU).toFixed(4)),
           z_min: parseFloat((gW(b.gz) - 0.5).toFixed(4)),
           z_max: parseFloat((gW(b.gz) + d - 0.5).toFixed(4))
         },
@@ -703,7 +984,7 @@ document.getElementById('btn-reset').addEventListener('click', () => {
   [...placed].forEach(b => { scene.remove(b.mesh); });
   placed.length = 0;
   Object.keys(occ).forEach(k => delete occ[k]);
-  Object.assign(inventory, { 'blue-2x4': 5, 'blue-2x2': 5, 'yellow-2x4': 5, 'yellow-2x2': 5 });
+  Object.assign(inventory, initialInventory)
   clearSelection();
   refreshInventory();
   setStatus('Build reset — drag a block to start');
@@ -715,6 +996,7 @@ function animate() {
   controls.update();
   renderer.render(scene, camera);
 }
+renderSidebar();  // Generate the UI!
 animate();
 refreshInventory();
 </script>
