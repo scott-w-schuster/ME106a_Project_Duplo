@@ -14,12 +14,15 @@ from sensor_msgs.msg import JointState
 
 from planning.ik import IKPlanner
 
-# Arm moves to this pose after grasping so the planning node can verify pickup
 CHECK_X = 0.095
 CHECK_Y = 0.418
 CHECK_Z = 0.188
 
 LATCH = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+
+SPEED_SLOW = 0.05
+SPEED_MED  = 0.15
+SPEED_FAST = 0.3
 
 SCAN_POSES = [
    (0.095,  0.408, 0.288),
@@ -30,7 +33,6 @@ SCAN_POSES = [
    (-0.295,  0.408, 0.288),
    (-0.395,  0.408, 0.288),
 ]
-
 
 
 class UR7e_CubeGrasp(Node):
@@ -45,18 +47,15 @@ class UR7e_CubeGrasp(Node):
 
         cb = ReentrantCallbackGroup()
 
-        # ── Pose inputs from planning node ────────────────────────────────────
         self.pick_pose  = None
         self.place_pose = None
         self.create_subscription(PoseStamped, '/pick_pose',  self._on_pick_pose,  LATCH, callback_group=cb)
         self.create_subscription(PoseStamped, '/place_pose', self._on_place_pose, LATCH, callback_group=cb)
 
-        # ── Joint state ───────────────────────────────────────────────────────
         self.joint_state = None
         self._js_lock = threading.Lock()
         self.create_subscription(JointState, '/joint_states', self._on_joint_state, 1, callback_group=cb)
 
-        # ── Service servers (planning node calls these in order) ──────────────
         self._scan_idx = 0
         self.create_service(Trigger, '/move_to_pregrasp',     self._handle_pregrasp,   callback_group=cb)
         self.create_service(Trigger, '/grasp',                self._handle_grasp,      callback_group=cb)
@@ -64,7 +63,6 @@ class UR7e_CubeGrasp(Node):
         self.create_service(Trigger, '/preplace_and_place',   self._handle_place,      callback_group=cb)
         self.create_service(Trigger, '/next_scan_pose',       self._handle_scan_pose,  callback_group=cb)
 
-        # ── Hardware ──────────────────────────────────────────────────────────
         self.exec_ac = ActionClient(
             self, FollowJointTrajectory,
             '/scaled_joint_trajectory_controller/follow_joint_trajectory',
@@ -73,8 +71,7 @@ class UR7e_CubeGrasp(Node):
         self.gripper_cli = self.create_client(Trigger, '/toggle_gripper', callback_group=cb)
 
         self.ik_planner = IKPlanner()
-
-    # ── Subscriptions ─────────────────────────────────────────────────────────
+        self._motion_lock = threading.Lock()
 
     def _on_pick_pose(self, msg):
         self.pick_pose = msg
@@ -86,8 +83,6 @@ class UR7e_CubeGrasp(Node):
         with self._js_lock:
             self.joint_state = msg
 
-    # ── Service handlers (block until motion complete) ────────────────────────
-
     def _handle_scan_pose(self, _request, response):
         x, y, z = SCAN_POSES[self._scan_idx % len(SCAN_POSES)]
         self._scan_idx += 1
@@ -98,7 +93,7 @@ class UR7e_CubeGrasp(Node):
             print('[SCAN] FAIL — no joint state received yet', flush=True)
             return self._fail(response, 'no joint state')
         print(f'[SCAN] Joint state OK, calling IK...', flush=True)
-        ok = self._move_to(x, y, z, vel=0.05, accel=0.05)
+        ok = self._move_to(x, y, z, speed=SPEED_FAST)
         print(f'[SCAN] Move result: {ok}', flush=True)
         return self._result(response, ok, 'scan_pose')
 
@@ -108,7 +103,7 @@ class UR7e_CubeGrasp(Node):
         p = self.pick_pose.pose
         ok = self._move_to(p.position.x, p.position.y, p.position.z + self.PRE_GRASP_OFFSET,
                            p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w,
-                           vel=0.1, accel=0.1)
+                           speed=SPEED_MED)
         return self._result(response, ok, 'pregrasp')
 
     def _handle_grasp(self, _request, response):
@@ -119,14 +114,14 @@ class UR7e_CubeGrasp(Node):
 
         ok = (self._toggle_gripper()
               and self._move_to(p.position.x, p.position.y, p.position.z + self.GRASP_OFFSET,
-                                ox, oy, oz, ow, vel=0.05, accel=0.05)
+                                ox, oy, oz, ow, speed=SPEED_SLOW)
               and self._toggle_gripper()
               and self._move_to(p.position.x, p.position.y, p.position.z + self.PRE_GRASP_OFFSET,
-                                ox, oy, oz, ow, vel=0.1, accel=0.1))
+                                ox, oy, oz, ow, speed=SPEED_MED))
         return self._result(response, ok, 'grasp')
 
     def _handle_check(self, _request, response):
-        ok = self._move_to(CHECK_X, CHECK_Y, CHECK_Z, vel=0.15, accel=0.15)
+        ok = self._move_to(CHECK_X, CHECK_Y, CHECK_Z, speed=SPEED_FAST)
         return self._result(response, ok, 'move_to_check')
 
     def _handle_place(self, _request, response):
@@ -136,18 +131,19 @@ class UR7e_CubeGrasp(Node):
         ox, oy, oz, ow = p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w
 
         ok = (self._move_to(p.position.x, p.position.y, p.position.z + self.PRE_PLACE_OFFSET,
-                            ox, oy, oz, ow, vel=0.1, accel=0.1)
+                            ox, oy, oz, ow, speed=SPEED_MED)
               and self._move_to(p.position.x, p.position.y, p.position.z + self.PLACE_OFFSET,
-                                ox, oy, oz, ow, vel=0.05, accel=0.05)
+                                ox, oy, oz, ow, speed=SPEED_SLOW)
               and self._toggle_gripper()
               and self._move_to(p.position.x, p.position.y, p.position.z + self.PRE_PLACE_OFFSET,
-                                ox, oy, oz, ow, vel=0.1, accel=0.1))
+                                ox, oy, oz, ow, speed=SPEED_MED))
         return self._result(response, ok, 'place')
 
-    # ── Motion helpers ────────────────────────────────────────────────────────
+    def _move_to(self, x, y, z, qx=0.0, qy=1.0, qz=0.0, qw=0.0, speed=SPEED_MED) -> bool:
+        with self._motion_lock:
+            return self._move_to_locked(x, y, z, qx, qy, qz, qw, speed)
 
-    def _move_to(self, x, y, z, qx=0.0, qy=1.0, qz=0.0, qw=0.0,
-                 vel=0.1, accel=0.1) -> bool:
+    def _move_to_locked(self, x, y, z, qx=0.0, qy=1.0, qz=0.0, qw=0.0, speed=SPEED_MED) -> bool:
         with self._js_lock:
             js = self.joint_state
         if js is None:
@@ -158,11 +154,39 @@ class UR7e_CubeGrasp(Node):
         if joint_sol is None:
             return False
 
-        traj = self.ik_planner.plan_to_joints(joint_sol, vel, accel, start_joint_state=js)
+        traj = self.ik_planner.plan_to_joints(joint_sol, speed=speed)
         if traj is None:
             return False
 
-        return self._execute_traj(traj.joint_trajectory)
+        jt = traj.joint_trajectory
+        self._interpolate_waypoints(jt)
+        return self._execute_traj(jt)
+
+    def _interpolate_waypoints(self, joint_traj) -> None:
+        from builtin_interfaces.msg import Duration as RosDuration
+        from trajectory_msgs.msg import JointTrajectoryPoint
+
+        pts = joint_traj.points
+        if len(pts) < 2:
+            return
+
+        new_pts = []
+        for i in range(len(pts) - 1):
+            a, b = pts[i], pts[i + 1]
+            new_pts.append(a)
+
+            mid = JointTrajectoryPoint()
+            mid.positions     = [(float(a.positions[j])     + float(b.positions[j]))     / 2.0 for j in range(len(a.positions))]
+            mid.velocities    = [(float(a.velocities[j])    + float(b.velocities[j]))    / 2.0 for j in range(len(a.velocities))]    if a.velocities    else []
+            mid.accelerations = [(float(a.accelerations[j]) + float(b.accelerations[j])) / 2.0 for j in range(len(a.accelerations))] if a.accelerations else []
+            t_a = a.time_from_start.sec + a.time_from_start.nanosec * 1e-9
+            t_b = b.time_from_start.sec + b.time_from_start.nanosec * 1e-9
+            t_m = (t_a + t_b) / 2.0
+            mid.time_from_start = RosDuration(sec=int(t_m), nanosec=int(round((t_m - int(t_m)) * 1e9)))
+            new_pts.append(mid)
+
+        new_pts.append(pts[-1])
+        joint_traj.points = new_pts
 
     def _execute_traj(self, joint_traj) -> bool:
         done    = threading.Event()
@@ -207,8 +231,6 @@ class UR7e_CubeGrasp(Node):
         self.get_logger().info('Gripper toggled')
         return result[0] is not None
 
-    # ── Response helpers ──────────────────────────────────────────────────────
-
     def _result(self, response, ok, step):
         response.success = ok
         response.message = step if ok else f'{step} failed'
@@ -228,7 +250,6 @@ def main(args=None):
     node = UR7e_CubeGrasp()
     executor = MultiThreadedExecutor()
     executor.add_node(node)
-    executor.add_node(node.ik_planner)  # so IKPlanner futures get processed
     try:
         executor.spin()
     finally:

@@ -1,5 +1,0 @@
-  File "/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/planning/lib/python3.10/site-packages/planning/launch/duplo.launch.py", line 36
-    ExecuteProcess( cmd=[ 'ros2', 'launch', 'realsense2_camera', 'rs_launch.py', 'pointcloud.enable:=true', 
-    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-SyntaxError: invalid syntax. Perhaps you forgot a comma?
-

@@ -8,7 +8,6 @@ setup.py
 ../../build/planning/planning.egg-info/requires.txt
 ../../build/planning/planning.egg-info/top_level.txt
 ../../build/planning/planning.egg-info/zip-safe
-launch/__init__.py
 launch/duplo.launch.py
 launch/duplo_config.rviz
 planning/__init__.py

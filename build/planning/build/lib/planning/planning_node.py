@@ -36,11 +36,15 @@ BRICK_HEIGHTS = {'half': 0.0096, 'normal': 0.0192, 'tall': 0.0384}
 TF_TIMEOUT_SEC       = 1.0
 PICK_VERIFY_RADIUS_M = 0.05
 
+GRIPPER_ROT_OFFSET_DEG = 0.0
+PICK_X_OFFSET_M        = 0.0
+PICK_Y_OFFSET_M        = 0.0
+
 LATCH = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
 
 def block_rot_to_quat(rotation_deg: float):
-    q = R.from_euler('z', rotation_deg, degrees=True) * R.from_quat([0, 1, 0, 0])
+    q = R.from_euler('z', rotation_deg + GRIPPER_ROT_OFFSET_DEG, degrees=True) * R.from_quat([0, 1, 0, 0])
     x, y, z, w = q.as_quat()
     return float(x), float(y), float(z), float(w)
 
@@ -62,6 +66,7 @@ class LEGOBuildPlanner(Node):
         self._latest_meta     = None
         self._last_pick_pose  = None
         self._last_pick_color = None
+        self._scan_inventory: dict = {}
 
         self.pick_pub  = self.create_publisher(PoseStamped, '/pick_pose',  LATCH)
         self.place_pub = self.create_publisher(PoseStamped, '/place_pose', LATCH)
@@ -110,7 +115,6 @@ class LEGOBuildPlanner(Node):
 
     @staticmethod
     def _normalize_step(s: dict) -> dict:
-        """Map JSONBin step schema → internal schema."""
         gp = s.get('grid_position', {})
         return {
             'type':         s.get('type') or s.get('block_type', '2x4'),
@@ -160,62 +164,107 @@ class LEGOBuildPlanner(Node):
                         return
             print('[PLANNER] All services ready — starting scan', flush=True)
             self.get_logger().info('All services ready — scanning workspace...')
-            if not self._scan_workspace():
-                print('[PLANNER] Scan complete — baseplate not found — will retry in 5 s', flush=True)
+            baseplate_found, inventory = self._full_scan()
+            if not baseplate_found:
+                print('[PLANNER] Scan complete — baseplate not found — will retry', flush=True)
                 self.get_logger().warn('Baseplate not detected after full scan — retrying.')
                 self._started = False
                 return
+            self._verify_build_inventory(inventory)
             self._execute_step()
         except Exception as e:
             print(f'[PLANNER] CRASH: {e}\n{traceback.format_exc()}', flush=True)
             self.get_logger().error(f'_start_worker crashed: {e}\n{traceback.format_exc()}')
             self._started = False
 
-    def _scan_workspace(self) -> bool:
-        for i in range(12):
-            print(f'[PLANNER] Scan pose {i + 1}/12', flush=True)
-            self.get_logger().info(f'Scan pose {i + 1}/12 — moving arm...')
-            done = threading.Event()
-            resp = [None]
+    def _baseplate_visible(self) -> bool:
+        try:
+            self.tf_buffer.lookup_transform(
+                'base_link', 'baseplate_frame',
+                rclpy.time.Time(), timeout=Duration(seconds=0.3))
+            return True
+        except (tf2_ros.LookupException, tf2_ros.ExtrapolationException):
+            return False
 
-            def _cb(future, _r=resp, _d=done):
-                try:
-                    _r[0] = future.result()
-                except Exception as e:
-                    self.get_logger().error(f'Scan service error: {e}')
-                _d.set()
+    def _call_scan_pose(self) -> bool:
+        done = threading.Event()
+        resp = [None]
 
-            self.scan_cli.call_async(Trigger.Request()).add_done_callback(_cb)
-            if not done.wait(timeout=90.0):
-                self.get_logger().warn(f'Scan pose {i + 1} timed out')
-            elif resp[0] is not None and not resp[0].success:
-                self.get_logger().warn(
-                    f'Scan pose {i + 1} failed: {resp[0].message} '
-                    f'(IK or controller issue)')
-
-            time.sleep(1.0)
+        def _cb(future, _r=resp, _d=done):
             try:
-                self.tf_buffer.lookup_transform(
-                    'base_link', 'baseplate_frame',
-                    rclpy.time.Time(), timeout=Duration(seconds=0.3))
-                self.get_logger().info('Baseplate found during scan.')
-                return True
-            except (tf2_ros.LookupException, tf2_ros.ExtrapolationException):
-                self.get_logger().info('Baseplate not yet visible — continuing scan...')
-        return self._wait_for_baseplate(timeout_sec=10.0)
+                _r[0] = future.result()
+            except Exception as e:
+                self.get_logger().error(f'Scan service error: {e}')
+            _d.set()
 
-    def _wait_for_baseplate(self, timeout_sec: float) -> bool:
-        deadline = time.time() + timeout_sec
-        while rclpy.ok() and time.time() < deadline:
-            try:
-                self.tf_buffer.lookup_transform(
-                    'base_link', 'baseplate_frame',
-                    rclpy.time.Time(), timeout=Duration(seconds=0.5))
-                self.get_logger().info('baseplate_frame detected.')
-                return True
-            except (tf2_ros.LookupException, tf2_ros.ExtrapolationException):
-                pass
-        return False
+        self.scan_cli.call_async(Trigger.Request()).add_done_callback(_cb)
+        if not done.wait(timeout=90.0):
+            self.get_logger().warn('Scan pose timed out')
+            return False
+        return resp[0] is not None and resp[0].success
+
+    def _full_scan(self) -> tuple:
+        N_SCAN = 7
+        self._scan_inventory.clear()
+
+        baseplate_found = self._baseplate_visible()
+        if baseplate_found:
+            self.get_logger().info('Baseplate already visible before scan.')
+
+        for i in range(N_SCAN):
+            print(f'[PLANNER] Scan pose {i + 1}/{N_SCAN}', flush=True)
+            self.get_logger().info(f'Scan pose {i + 1}/{N_SCAN}')
+            self._call_scan_pose()
+            time.sleep(1.5)
+
+            if not baseplate_found:
+                baseplate_found = self._baseplate_visible()
+                if baseplate_found:
+                    self.get_logger().info(f'Baseplate found at scan pose {i + 1}/{N_SCAN}.')
+                    break
+
+            for brick in self._detect_bricks():
+                px = brick['pose'].pose.position.x
+                py = brick['pose'].pose.position.y
+                key = (brick['color'], brick['type'],
+                       round(px / 0.05), round(py / 0.05))
+                self._scan_inventory[key] = brick
+
+        inventory = list(self._scan_inventory.values())
+        self.get_logger().info(
+            f'Scan complete — {len(inventory)} unique brick location(s) accumulated.')
+        if not baseplate_found:
+            self.get_logger().warn('Baseplate not detected after full scan.')
+        return baseplate_found, inventory
+
+    def _verify_build_inventory(self, inventory: list) -> bool:
+        required: dict = {}
+        for step in self.build_sequence:
+            key = (step['color'], step['type'])
+            required[key] = required.get(key, 0) + 1
+
+        available: dict = {}
+        for b in inventory:
+            key = (b['color'], b['type'])
+            available[key] = available.get(key, 0) + 1
+
+        all_present = True
+        self.get_logger().info('======= Build Inventory Check =======')
+        for (color, btype), needed in sorted(required.items()):
+            have   = available.get((color, btype), 0)
+            status = 'OK     ' if have >= needed else 'MISSING'
+            self.get_logger().info(
+                f'  [{status}] {color} {btype}: need {needed}, detected {have}')
+            if have < needed:
+                all_present = False
+
+        if all_present:
+            self.get_logger().info('All required bricks detected — starting build.')
+        else:
+            self.get_logger().warn(
+                'One or more bricks not detected — build will proceed but may skip steps.')
+        self.get_logger().info('=====================================')
+        return all_present
 
     def _execute_step(self):
         if self.current_step >= len(self.build_sequence):
@@ -232,7 +281,15 @@ class LEGOBuildPlanner(Node):
         detected = self._detect_bricks()
         brick_match = self._find_brick(detected, step['type'], step['color'])
         if brick_match is None:
-            self.get_logger().error(f'No {step["color"]} {step["type"]} found — skipping')
+            scan_bricks = list(self._scan_inventory.values())
+            brick_match = self._find_brick(scan_bricks, step['type'], step['color'])
+            if brick_match is not None:
+                self.get_logger().warn(
+                    f'Live detection missed {step["color"]} {step["type"]} — '
+                    f'using scan-inventory pose as fallback.')
+        if brick_match is None:
+            self.get_logger().error(
+                f'No {step["color"]} {step["type"]} found in live or scan inventory — skipping')
             self.current_step += 1
             self._execute_step()
             return
@@ -240,6 +297,8 @@ class LEGOBuildPlanner(Node):
         pick_pose   = brick_match['pose']
         height_type = brick_match.get('height_type', 'normal')
         brick_h     = BRICK_HEIGHTS.get(height_type, BRICK_HEIGHTS['normal'])
+        pick_pose.pose.position.x += PICK_X_OFFSET_M
+        pick_pose.pose.position.y += PICK_Y_OFFSET_M
         pick_pose.pose.position.z += brick_h / 2.0
 
         place_pose = self._grid_to_pose(step)

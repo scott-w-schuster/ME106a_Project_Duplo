@@ -1,5 +1,5 @@
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, RegisterEventHandler, EmitEvent
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, RegisterEventHandler, EmitEvent, ExecuteProcess
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
@@ -16,9 +16,8 @@ def generate_launch_description():
     )
 
     ur_type = LaunchConfiguration("ur_type", default="ur7e")
-    launch_rviz = LaunchConfiguration("launch_rviz", default="false") # make false if you don't want rviz to launch when launching moveit
+    launch_rviz = LaunchConfiguration("launch_rviz", default="false")
 
-   
     realsense_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(
@@ -33,7 +32,6 @@ def generate_launch_description():
         }.items(),
     )
 
-    # MoveIt include
     moveit_launch_file = os.path.join(
         get_package_share_directory("ur_moveit_config"),
         "launch",
@@ -54,27 +52,29 @@ def generate_launch_description():
         output='screen'
     )
 
-    camera_transformn_node=Node(
-            package='perception',
-            executable='camera_transform',
-        ),
-    brick_detection_node=Node(
+    camera_transform_node = Node(
+        package='perception',
+        executable='camera_transform',
+    )
+
+    brick_detection_node = Node(
         package='perception',
         executable='brick_detector',
         output='screen',
         name='brick_detection_node',
-    ),
-    planning_main_node=Node(
+    )
+
+    planning_main_node = Node(
         package='planning',
         executable='main',
         output='screen',
-    ),
-    planning_node_node=Node(
+    )
+
+    planning_node_node = Node(
         package='planning',
         executable='planning_node',
         output='screen',
-    ),
-    
+    )
 
     shutdown_on_any_exit = RegisterEventHandler(
         OnProcessExit(
@@ -83,21 +83,16 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
-
-        # Actions
         realsense_launch,
         moveit_launch,
         ik_planner_node,
-        camera_transformn_node,
+        camera_transform_node,
         planning_main_node,
         brick_detection_node,
         planning_node_node,
-
         ExecuteProcess(
-        cmd=['rviz2', '-d', rviz_config],
-        output='screen',
+            cmd=['rviz2', '-d', rviz_config],
+            output='screen',
         ),
-
-        # Global handler (keep at end)
         shutdown_on_any_exit,
     ])

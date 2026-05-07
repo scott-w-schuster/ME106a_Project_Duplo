@@ -1,0 +1,45 @@
+[1.246s] Invoking command in '/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/src/perception': PYTHONPATH=/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/perception/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/perception/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/perception build --build-base /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/perception/build install --record /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/perception/install.log --single-version-externally-managed install_data
+[1.517s] running egg_info
+[1.517s] creating ../../build/perception/perception.egg-info
+[1.519s] writing ../../build/perception/perception.egg-info/PKG-INFO
+[1.532s] writing dependency_links to ../../build/perception/perception.egg-info/dependency_links.txt
+[1.538s] writing entry points to ../../build/perception/perception.egg-info/entry_points.txt
+[1.544s] writing requirements to ../../build/perception/perception.egg-info/requires.txt
+[1.548s] writing top-level names to ../../build/perception/perception.egg-info/top_level.txt
+[1.553s] writing manifest file '../../build/perception/perception.egg-info/SOURCES.txt'
+[1.566s] reading manifest file '../../build/perception/perception.egg-info/SOURCES.txt'
+[1.570s] writing manifest file '../../build/perception/perception.egg-info/SOURCES.txt'
+[1.571s] running build
+[1.571s] running build_py
+[1.573s] creating /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/perception/build
+[1.574s] creating /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/perception/build/lib
+[1.576s] creating /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/perception/build/lib/perception
+[1.578s] copying perception/__init__.py -> /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/perception/build/lib/perception
+[1.583s] copying perception/static_tf_transform.py -> /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/perception/build/lib/perception
+[1.591s] copying perception/brick_detector.py -> /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/perception/build/lib/perception
+[1.600s] copying perception/hsv_tuner.py -> /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/perception/build/lib/perception
+[1.608s] running install
+[1.608s] running install_lib
+[1.616s] creating /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/perception/lib/python3.10/site-packages/perception
+[1.616s] copying /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/perception/build/lib/perception/__init__.py -> /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/perception/lib/python3.10/site-packages/perception
+[1.622s] copying /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/perception/build/lib/perception/static_tf_transform.py -> /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/perception/lib/python3.10/site-packages/perception
+[1.630s] copying /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/perception/build/lib/perception/brick_detector.py -> /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/perception/lib/python3.10/site-packages/perception
+[1.641s] copying /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/perception/build/lib/perception/hsv_tuner.py -> /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/perception/lib/python3.10/site-packages/perception
+[1.653s] byte-compiling /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/perception/lib/python3.10/site-packages/perception/__init__.py to __init__.cpython-310.pyc
+[1.660s] byte-compiling /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/perception/lib/python3.10/site-packages/perception/static_tf_transform.py to static_tf_transform.cpython-310.pyc
+[1.670s] byte-compiling /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/perception/lib/python3.10/site-packages/perception/brick_detector.py to brick_detector.cpython-310.pyc
+[1.694s] byte-compiling /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/perception/lib/python3.10/site-packages/perception/hsv_tuner.py to hsv_tuner.cpython-310.pyc
+[1.707s] running install_data
+[1.708s] creating /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/perception/share/ament_index
+[1.710s] creating /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/perception/share/ament_index/resource_index
+[1.710s] creating /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/perception/share/ament_index/resource_index/packages
+[1.712s] copying resource/perception -> /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/perception/share/ament_index/resource_index/packages
+[1.739s] copying package.xml -> /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/perception/share/perception
+[1.745s] running install_egg_info
+[1.751s] Copying ../../build/perception/perception.egg-info to /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/perception/lib/python3.10/site-packages/perception-0.0.0-py3.10.egg-info
+[1.821s] running install_scripts
+[1.850s] Installing brick_detector script to /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/perception/lib/perception
+[1.854s] Installing camera_transform script to /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/perception/lib/perception
+[1.858s] Installing hsv_tuner script to /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/perception/lib/perception
+[1.864s] writing list of installed files to '/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/perception/install.log'
+[1.884s] Invoked command in '/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/src/perception' returned '0': PYTHONPATH=/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/perception/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/install/perception/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/perception build --build-base /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/perception/build install --record /home/cc/ee106a/sp26/class/ee106a-aca/Duplo_Project/build/perception/install.log --single-version-externally-managed install_data
