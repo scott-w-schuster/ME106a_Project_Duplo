@@ -178,9 +178,8 @@ class UR7e_CubeGrasp(Node):
         return self._execute_traj(jt)
 
     def _sanitize_trajectory(self, joint_traj, vel_scale: float) -> None:
-        """Recompute waypoint timing so no joint velocity exceeds hardware limits,
-        then strip MoveIt-generated velocity/acceleration fields so the UR controller
-        interpolates purely from positions + corrected timestamps."""
+        """Recompute waypoint timing and set explicit velocities so the UR controller
+        cannot overshoot hardware limits via its own cubic-spline interpolation."""
         from builtin_interfaces.msg import Duration as RosDuration
 
         pts   = joint_traj.points
@@ -189,54 +188,50 @@ class UR7e_CubeGrasp(Node):
         if n < 2:
             return
 
-        # Snapshot original timestamps BEFORE modifying anything so dt_planned
-        # is always computed from the planner's original segment durations.
-        orig_t = [
-            pt.time_from_start.sec + pt.time_from_start.nanosec * 1e-9
-            for pt in pts
-        ]
+        # ── Pass 1: snapshot original times, then compute new timing ─────────
+        orig_t = [pt.time_from_start.sec + pt.time_from_start.nanosec * 1e-9
+                  for pt in pts]
 
-        t_acc = 0.0
-        for i in range(n):
-            nj = len(pts[i].positions)
-
-            if i == 0:
-                pts[0].time_from_start = RosDuration(sec=0, nanosec=0)
-                pts[0].velocities     = [0.0] * nj
-                pts[0].accelerations  = [0.0] * nj
-                continue
-
+        t_new = [0.0] * n
+        for i in range(1, n):
             dt_planned = orig_t[i] - orig_t[i - 1]
             dt_min     = max(dt_planned, 1e-3)
-
-            prev = pts[i - 1]
-            curr = pts[i]
             for j, name in enumerate(names):
                 limit = self._JOINT_VEL_LIMITS.get(name, 2.094) * vel_scale
                 if limit <= 0:
                     continue
-                if j < len(curr.positions) and j < len(prev.positions):
-                    delta = abs(float(curr.positions[j]) - float(prev.positions[j]))
+                if j < len(pts[i].positions) and j < len(pts[i - 1].positions):
+                    delta = abs(float(pts[i].positions[j]) - float(pts[i - 1].positions[j]))
                     dt_min = max(dt_min, delta / limit)
+            t_new[i] = t_new[i - 1] + dt_min
 
-            t_acc += dt_min
-            secs  = int(t_acc)
-            nsecs = int(round((t_acc - secs) * 1e9))
-            pts[i].time_from_start = RosDuration(sec=secs, nanosec=nsecs)
-
-            # Clear MoveIt velocities/accelerations on all intermediate points;
-            # keep explicit zeros only on first and last so the controller splines
-            # correctly without hitting hardware limits mid-trajectory.
-            if i < n - 1:
-                pts[i].velocities    = []
-                pts[i].accelerations = []
+        # ── Pass 2: compute explicit velocities via central differences ───────
+        # Central difference keeps velocities naturally within vel_scale*hw_limit.
+        # Hardware-limit clamp is a safety net for edge cases.
+        vels = []
+        for i in range(n):
+            nj = len(pts[i].positions)
+            if i == 0 or i == n - 1:
+                vels.append([0.0] * nj)
             else:
-                pts[i].velocities    = [0.0] * nj
-                pts[i].accelerations = [0.0] * nj
+                dt_span = t_new[i + 1] - t_new[i - 1]
+                v = []
+                for j in range(nj):
+                    raw      = (float(pts[i + 1].positions[j]) - float(pts[i - 1].positions[j])) / dt_span
+                    hw_limit = self._JOINT_VEL_LIMITS.get(names[j] if j < len(names) else '', 2.094)
+                    v.append(max(-hw_limit, min(hw_limit, raw)))
+                vels.append(v)
+
+        # ── Pass 3: write timestamps, velocities, clear accelerations ─────────
+        for i in range(n):
+            secs  = int(t_new[i])
+            nsecs = int(round((t_new[i] - secs) * 1e9))
+            pts[i].time_from_start = RosDuration(sec=secs, nanosec=nsecs)
+            pts[i].velocities      = vels[i]
+            pts[i].accelerations   = []
 
         self.get_logger().info(
-            f'Trajectory sanitized: {n} pts, '
-            f'total {t_acc:.2f}s (vel_scale={vel_scale})'
+            f'Trajectory sanitized: {n} pts, total {t_new[-1]:.2f}s (vel_scale={vel_scale})'
         )
 
     def _execute_traj(self, joint_traj) -> bool:
