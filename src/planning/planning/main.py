@@ -15,9 +15,9 @@ from sensor_msgs.msg import JointState
 from planning.ik import IKPlanner
 
 # Arm moves to this pose after grasping so the planning node can verify pickup
-CHECK_X = 0.3   # TODO: set for your robot workspace
-CHECK_Y = 0.0
-CHECK_Z = 0.5
+CHECK_X = 0.095
+CHECK_Y = 0.418
+CHECK_Z = 0.188
 
 LATCH = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
@@ -25,9 +25,9 @@ LATCH = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 class UR7e_CubeGrasp(Node):
 
     PRE_GRASP_OFFSET = 0.185
-    GRASP_OFFSET     = 0.05
+    GRASP_OFFSET     = 0.1
     PRE_PLACE_OFFSET = 0.185
-    PLACE_OFFSET     = 0.02
+    PLACE_OFFSET     = 0.1
 
     def __init__(self):
         super().__init__('cube_grasp')
