@@ -18,7 +18,19 @@ import tf2_ros
 import tf2_geometry_msgs
 
 STUD_PITCH_M = 0.016
-BLOCK_DIMS   = {'2x2': (2, 2), '2x4': (2, 4), '2x6': (2, 6)}
+BLOCK_DIMS   = {
+    '1x2':                  (1, 2),
+    '2x2':                  (2, 2),
+    '2x4':                  (2, 4),
+    '2x6':                  (2, 6),
+    '2x4-fillet-top-both':  (2, 4),
+    '2x4-fillet-bot-both':  (2, 4),
+    '2x3-fillet-top':       (2, 3),
+    '2x4-half':             (2, 4),
+    '2x6-half':             (2, 6),
+    '1x2-double':           (1, 2),
+    '2x2-cylinder':         (2, 2),
+}
 BRICK_HEIGHTS = {'half': 0.0096, 'normal': 0.0192, 'tall': 0.0384}
 
 TF_TIMEOUT_SEC       = 1.0

@@ -505,7 +505,11 @@ class BrickDetectorNode(Node):
         if self.latest_rgb is not None and self.fx is not None:
             result = self._shape_from_studs(cluster_pts)
             if result is not None:
-                return result
+                stud_rows, stud_cols, angle_deg = result
+                pc_rows, pc_cols, _ = self._shape_from_pointcloud_extent(cluster_pts)
+                if pc_rows * pc_cols > stud_rows * stud_cols * 1.5:
+                    return pc_rows, pc_cols, angle_deg
+                return stud_rows, stud_cols, angle_deg
 
         return self._shape_from_pointcloud_extent(cluster_pts)
 
