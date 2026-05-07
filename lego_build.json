@@ -1,0 +1,22 @@
+[
+  {
+    "step": 1,
+    "block_id": "b0",
+    "type": "2x4",
+    "color": "blue",
+    "layer": 0,
+    "grid_x": 10,
+    "grid_z": 8,
+    "rotation_deg": 0
+  },
+  {
+    "step": 2,
+    "block_id": "b1",
+    "type": "2x4",
+    "color": "yellow",
+    "layer": 0,
+    "grid_x": 12,
+    "grid_z": 10,
+    "rotation_deg": 90
+  }
+]

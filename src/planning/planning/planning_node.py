@@ -96,10 +96,14 @@ class LEGOBuildPlanner(Node):
         except Exception as e:
             self.get_logger().warn(f'JSONBin fetch failed ({e}), falling back to local file.')
             path = self.get_parameter('build_plan_path').get_parameter_value().string_value
-            with open(path) as f:
-                sequence = json.load(f)
-            self.get_logger().info(f'Loaded {len(sequence)} block(s) from local file.')
-            return sequence
+            try:
+                with open(path) as f:
+                    sequence = json.load(f)
+                self.get_logger().info(f'Loaded {len(sequence)} block(s) from local file.')
+                return sequence
+            except FileNotFoundError:
+                self.get_logger().error(f'Local file {path} not found. No build plan loaded.')
+                return []
 
     def _compute_layer_heights(self) -> dict:
         layers = {}
