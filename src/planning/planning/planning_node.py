@@ -139,16 +139,20 @@ class LEGOBuildPlanner(Node):
         try:
             for cli in (self.pregrasp_cli, self.grasp_cli, self.check_cli, self.place_cli, self.scan_cli):
                 cli.wait_for_service()
+            print('[PLANNER] All services ready — starting scan', flush=True)
             self.get_logger().info('All services ready — scanning workspace...')
             if not self._scan_workspace():
+                print('[PLANNER] Scan complete — baseplate not found', flush=True)
                 self.get_logger().error('Baseplate not detected after full scan — aborting.')
                 return
             self._execute_step()
         except Exception as e:
+            print(f'[PLANNER] CRASH: {e}\n{traceback.format_exc()}', flush=True)
             self.get_logger().error(f'_start_worker crashed: {e}\n{traceback.format_exc()}')
 
     def _scan_workspace(self) -> bool:
         for i in range(12):
+            print(f'[PLANNER] Scan pose {i + 1}/12', flush=True)
             self.get_logger().info(f'Scan pose {i + 1}/12 — moving arm...')
             done = threading.Event()
             resp = [None]
