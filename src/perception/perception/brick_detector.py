@@ -759,10 +759,17 @@ class BrickDetectorNode(Node):
         for i, mid in enumerate(ids.flatten()):
             if mid != ARUCO_MARKER_ID:
                 continue
-            rvecs, tvecs, _ = cv2.aruco.estimatePoseSingleMarkers(
-                [corners[i]], ARUCO_MARKER_SIZE_M, cam_mat, self.dist_coeffs)
-            rvec = rvecs[0][0]
-            tvec = tvecs[0][0]
+            half = ARUCO_MARKER_SIZE_M / 2.0
+            obj_pts = np.array([
+                [-half,  half, 0],
+                [ half,  half, 0],
+                [ half, -half, 0],
+                [-half, -half, 0],
+            ], dtype=np.float32)
+            _, rvec, tvec = cv2.solvePnP(
+                obj_pts, corners[i].reshape(4, 2), cam_mat, self.dist_coeffs)
+            rvec = rvec.flatten()
+            tvec = tvec.flatten()
             R_mat, _ = cv2.Rodrigues(rvec)
             origin_cam = tvec + R_mat @ ARUCO_TO_BP_OFFSET
             X         = float(origin_cam[0])
