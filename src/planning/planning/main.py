@@ -1,6 +1,5 @@
 import threading
 
-import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.callback_groups import ReentrantCallbackGroup
@@ -145,16 +144,6 @@ class UR7e_CubeGrasp(Node):
                                 ox, oy, oz, ow, vel=0.1, accel=0.1))
         return self._result(response, ok, 'place')
 
-    # ── Joint velocity limits (UR7e hardware maxima, rad/s) ──────────────────
-    _JOINT_VEL_LIMITS = {
-        'shoulder_pan_joint':  2.094,
-        'shoulder_lift_joint': 2.094,
-        'elbow_joint':         3.142,
-        'wrist_1_joint':       3.142,
-        'wrist_2_joint':       3.142,
-        'wrist_3_joint':       3.142,
-    }
-
     # ── Motion helpers ────────────────────────────────────────────────────────
 
     def _move_to(self, x, y, z, qx=0.0, qy=1.0, qz=0.0, qw=0.0,
@@ -173,59 +162,7 @@ class UR7e_CubeGrasp(Node):
         if traj is None:
             return False
 
-        jt = traj.joint_trajectory
-        self._sanitize_trajectory(jt, vel)
-        return self._execute_traj(jt)
-
-    def _sanitize_trajectory(self, joint_traj, vel_scale: float) -> None:
-        """Recompute waypoint timing and zero all velocities so the UR controller
-        cannot overshoot hardware limits.
-
-        With v=0 at every waypoint, the Hermite spline peak per segment is
-        1.5 * Δpos / T.  We size T >= Δpos / (hw_limit * vel_scale * 0.5),
-        so peak <= 1.5 * 0.5 * vel_scale * hw_limit = 0.75 * vel_scale * hw_limit,
-        which is always safely below the hardware limit for any vel_scale <= 1.
-        """
-        from builtin_interfaces.msg import Duration as RosDuration
-
-        pts   = joint_traj.points
-        names = joint_traj.joint_names
-        n     = len(pts)
-        print(f'[SANITIZE] {n} pts, vel_scale={vel_scale}', flush=True)
-        if n < 2:
-            return
-
-        # Snapshot original timestamps before touching any point
-        orig_t = [pt.time_from_start.sec + pt.time_from_start.nanosec * 1e-9
-                  for pt in pts]
-
-        # Compute new timestamps — 0.5 safety factor accounts for Hermite peak
-        t_new = [0.0] * n
-        for i in range(1, n):
-            dt_planned = orig_t[i] - orig_t[i - 1]
-            dt_min     = max(dt_planned, 1e-3)
-            for j, name in enumerate(names):
-                limit = self._JOINT_VEL_LIMITS.get(name, 2.094) * vel_scale * 0.5
-                if limit <= 0:
-                    continue
-                if j < len(pts[i].positions) and j < len(pts[i - 1].positions):
-                    delta = abs(float(pts[i].positions[j]) - float(pts[i - 1].positions[j]))
-                    dt_min = max(dt_min, delta / limit)
-            t_new[i] = t_new[i - 1] + dt_min
-
-        # Write back: zero velocities and accelerations everywhere
-        nj = len(pts[0].positions) if pts else 0
-        for i in range(n):
-            secs  = int(t_new[i])
-            nsecs = int(round((t_new[i] - secs) * 1e9))
-            pts[i].time_from_start = RosDuration(sec=secs, nanosec=nsecs)
-            pts[i].velocities      = [0.0] * nj
-            pts[i].accelerations   = [0.0] * nj
-
-        print(f'[SANITIZE] total {t_new[-1]:.2f}s', flush=True)
-        self.get_logger().info(
-            f'Trajectory sanitized: {n} pts, total {t_new[-1]:.2f}s (vel_scale={vel_scale})'
-        )
+        return self._execute_traj(traj.joint_trajectory)
 
     def _execute_traj(self, joint_traj) -> bool:
         done    = threading.Event()
