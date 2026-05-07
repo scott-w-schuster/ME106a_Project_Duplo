@@ -183,7 +183,36 @@ class UR7e_CubeGrasp(Node):
         if traj is None:
             return False
 
-        return self._execute_traj(traj.joint_trajectory)
+        jt = traj.joint_trajectory
+        self._fix_trajectory_timing(jt)
+        return self._execute_traj(jt)
+
+    def _fix_trajectory_timing(self, joint_traj, min_dt=0.1) -> None:
+        pts = joint_traj.points
+        if len(pts) < 2:
+            return
+
+        def get_t(pt):
+            return pt.time_from_start.sec + pt.time_from_start.nanosec * 1e-9
+
+        def set_t(pt, t):
+            pt.time_from_start.sec = int(t)
+            pt.time_from_start.nanosec = int(round((t - int(t)) * 1e9))
+
+        shift = 0.0
+        for i in range(1, len(pts)):
+            t_prev = get_t(pts[i - 1])
+            t_curr = get_t(pts[i]) + shift
+            dt = t_curr - t_prev
+            if 0 < dt < min_dt:
+                ratio = dt / min_dt
+                if pts[i].velocities:
+                    pts[i].velocities    = [v * ratio for v in pts[i].velocities]
+                if pts[i].accelerations:
+                    pts[i].accelerations = [a * ratio * ratio for a in pts[i].accelerations]
+                shift  += min_dt - dt
+                t_curr += min_dt - dt
+            set_t(pts[i], t_curr)
 
     def _execute_traj(self, joint_traj) -> bool:
         done    = threading.Event()
