@@ -38,11 +38,10 @@ class LEGOBuildPlanner(Node):
     def __init__(self):
         super().__init__('lego_build_planner')
 
+        self.declare_parameter('jsonbin_id',  '69fa7a5d36566621a82c98c7')
+        self.declare_parameter('jsonbin_key', '$2a$10$NCneQ9Ep5v3h/EScA.B7E../Xy0LcWBhFaGgSHjuoQ.NAoxjmZTJC')
         self.declare_parameter('build_plan_path', 'lego_build.json')
-        path = self.get_parameter('build_plan_path').get_parameter_value().string_value
-        with open(path) as f:
-            self.build_sequence = json.load(f)
-        self.get_logger().info(f'Loaded {len(self.build_sequence)} block(s)')
+        self.build_sequence = self._fetch_build_plan()
         self.current_step = 0
         self._layer_base_z = self._compute_layer_heights()
 
@@ -68,6 +67,27 @@ class LEGOBuildPlanner(Node):
 
         self._started = False
         self.create_timer(3.0, self._start)
+
+    def _fetch_build_plan(self) -> list:
+        bin_id = self.get_parameter('jsonbin_id').get_parameter_value().string_value
+        key    = self.get_parameter('jsonbin_key').get_parameter_value().string_value
+        try:
+            resp = requests.get(
+                f'https://api.jsonbin.io/v3/b/{bin_id}/latest',
+                headers={'X-Master-Key': key},
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+            sequence = resp.json()['record']
+            self.get_logger().info(f'Fetched {len(sequence)} block(s) from JSONBin.')
+            return sequence
+        except Exception as e:
+            self.get_logger().warn(f'JSONBin fetch failed ({e}), falling back to local file.')
+            path = self.get_parameter('build_plan_path').get_parameter_value().string_value
+            with open(path) as f:
+                sequence = json.load(f)
+            self.get_logger().info(f'Loaded {len(sequence)} block(s) from local file.')
+            return sequence
 
     def _compute_layer_heights(self) -> dict:
         layers = {}
