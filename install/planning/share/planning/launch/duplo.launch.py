@@ -10,8 +10,6 @@ from launch.actions import LogInfo
 import os
 
 
-
-
 def generate_launch_description():
   rviz_config = os.path.join(
       get_package_share_directory('planning'),
@@ -67,8 +65,9 @@ def generate_launch_description():
 
 
   rviz_on = ExecuteProcess(
-      cmd=['rviz2', '-d', rviz_config]
-  )
+      cmd=['rviz2', '-d', rviz_config],
+      output={'stdout': 'log', 'stderr':'log'},
+      )
 
 
   return LaunchDescription([
