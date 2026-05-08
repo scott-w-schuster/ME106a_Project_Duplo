@@ -144,7 +144,9 @@ class BrickDetectorNode(Node):
 
         self.baseplate_z_cam = None
 
-        self._aruco_window: list = []   # rolling buffer of (translation, quaternion) in base_link
+        self._aruco_detector  = self._build_aruco_detector()
+        self._aruco_dict      = cv2.aruco.getPredefinedDictionary(ARUCO_DICT_ID)
+        self._aruco_window: list = []
 
         self._tracks: list = []
 
@@ -180,6 +182,20 @@ class BrickDetectorNode(Node):
         self.get_logger().info('BrickDetectorNode initialized.')
 
 
+
+    @staticmethod
+    def _build_aruco_detector():
+        try:
+            aruco_dict = cv2.aruco.getPredefinedDictionary(ARUCO_DICT_ID)
+            params     = cv2.aruco.DetectorParameters()
+            params.minMarkerPerimeterRate    = 0.01
+            params.adaptiveThreshWinSizeMin  = 3
+            params.adaptiveThreshWinSizeMax  = 23
+            params.adaptiveThreshWinSizeStep = 10
+            params.errorCorrectionRate       = 0.8
+            return cv2.aruco.ArucoDetector(aruco_dict, params)
+        except AttributeError:
+            return None
 
     def _validate_camera_frame(self):
         if self._frame_validated:
@@ -674,9 +690,8 @@ class BrickDetectorNode(Node):
             return None
 
         gray = cv2.cvtColor(rgb, cv2.COLOR_BGR2GRAY)
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-        gray_clahe      = clahe.apply(gray)
-        gray_blur_clahe = clahe.apply(cv2.GaussianBlur(gray, (5, 5), 1.0))
+        clahe      = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        gray_clahe = clahe.apply(gray)
 
         try:
             self.aruco_debug_pub.publish(
@@ -684,59 +699,34 @@ class BrickDetectorNode(Node):
         except Exception:
             pass
 
-        attempts = [
-            ('raw+permissive',        gray,            0.01, 3,   53,  4),
-            ('clahe+permissive',      gray_clahe,      0.01, 3,   53,  4),
-            ('raw+default',           gray,            0.03, 3,   23, 10),
-            ('clahe+default',         gray_clahe,      0.03, 3,   23, 10),
-            ('blur_clahe+permissive', gray_blur_clahe, 0.01, 3,   53,  4),
-            ('raw+wide',              gray,            0.01, 3,  103,  8),
-        ]
-
-        for label, img, min_perim, amin, amax, astep in attempts:
-            result = self._aruco_detect_on(img, label, min_perim, amin, amax, astep)
+        for label, img in (('raw', gray), ('clahe', gray_clahe)):
+            result = self._aruco_detect_on(img, label)
             if result is not None:
                 return result
 
         self.get_logger().warn(
-            'ArUco: no markers detected after all attempts — '
-            'check DICT_4X4_50 marker ID 0 is visible and well-lit',
+            'ArUco: marker ID 0 not found — check DICT_4X4_50 tag is visible and well-lit',
             throttle_duration_sec=5.0)
         return None
 
-    def _aruco_detect_on(self, gray: np.ndarray, label: str,
-                         min_perim: float = 0.01,
-                         adapt_min: int = 3, adapt_max: int = 53, adapt_step: int = 4):
+    def _aruco_detect_on(self, gray: np.ndarray, label: str):
         try:
-            aruco_dict = cv2.aruco.getPredefinedDictionary(ARUCO_DICT_ID)
-            params     = cv2.aruco.DetectorParameters()
-            params.minMarkerPerimeterRate    = min_perim
-            params.adaptiveThreshWinSizeMin  = adapt_min
-            params.adaptiveThreshWinSizeMax  = adapt_max
-            params.adaptiveThreshWinSizeStep = adapt_step
-            params.errorCorrectionRate       = 0.8
-            try:
-                params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
-            except AttributeError:
-                pass
-            detector = cv2.aruco.ArucoDetector(aruco_dict, params)
-            corners, ids, _ = detector.detectMarkers(gray)
-        except AttributeError:
-            aruco_dict = cv2.aruco.Dictionary_get(ARUCO_DICT_ID)
-            params     = cv2.aruco.DetectorParameters_create()
-            params.minMarkerPerimeterRate    = min_perim
-            params.adaptiveThreshWinSizeMin  = adapt_min
-            params.adaptiveThreshWinSizeMax  = adapt_max
-            params.adaptiveThreshWinSizeStep = adapt_step
-            params.errorCorrectionRate       = 0.8
-            corners, ids, _ = cv2.aruco.detectMarkers(gray, aruco_dict, parameters=params)
+            if self._aruco_detector is not None:
+                corners, ids, _ = self._aruco_detector.detectMarkers(gray)
+            else:
+                corners, ids, _ = cv2.aruco.detectMarkers(
+                    gray, self._aruco_dict,
+                    parameters=cv2.aruco.DetectorParameters_create())
+        except Exception as e:
+            self.get_logger().warn(f'ArUco detect error [{label}]: {e}',
+                                   throttle_duration_sec=5.0)
+            return None
 
         if ids is None:
             return None
 
         self.get_logger().info(
-            f'ArUco [{label}]: found markers {ids.flatten().tolist()} — '
-            f'looking for ID {ARUCO_MARKER_ID}',
+            f'ArUco [{label}]: found markers {ids.flatten().tolist()}',
             throttle_duration_sec=2.0)
 
         cam_mat = np.array([[self.fx, 0, self.cx],
@@ -746,17 +736,15 @@ class BrickDetectorNode(Node):
         for i, mid in enumerate(ids.flatten()):
             if mid != ARUCO_MARKER_ID:
                 continue
-            half = ARUCO_MARKER_SIZE_M / 2.0
-            obj_pts = np.array([
-                [-half,  half, 0],
-                [ half,  half, 0],
-                [ half, -half, 0],
-                [-half, -half, 0],
-            ], dtype=np.float32)
+            half    = ARUCO_MARKER_SIZE_M / 2.0
+            obj_pts = np.array([[-half,  half, 0],
+                                 [ half,  half, 0],
+                                 [ half, -half, 0],
+                                 [-half, -half, 0]], dtype=np.float32)
             _, rvec, tvec = cv2.solvePnP(
                 obj_pts, corners[i].reshape(4, 2), cam_mat, self.dist_coeffs)
-            rvec = rvec.flatten()
-            tvec = tvec.flatten()
+            rvec     = rvec.flatten()
+            tvec     = tvec.flatten()
             R_mat, _ = cv2.Rodrigues(rvec)
             origin_cam = tvec + R_mat @ ARUCO_TO_BP_OFFSET
             X         = float(origin_cam[0])
