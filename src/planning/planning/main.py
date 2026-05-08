@@ -1,5 +1,6 @@
 import queue as _queue
 import threading
+import time
 
 import rclpy
 from rclpy.node import Node
@@ -51,6 +52,7 @@ class UR7e_CubeGrasp(Node):
 
         self.joint_state = None
         self._js_lock = threading.Lock()
+        self._js_recv_time = 0.0
         self.create_subscription(JointState, '/joint_states', self._on_joint_state, 1, callback_group=cb)
 
         self._scan_idx = 0
@@ -69,7 +71,8 @@ class UR7e_CubeGrasp(Node):
 
         self.ik_planner = IKPlanner()
 
-        self._cmd_queue = _queue.Queue()
+        self._cmd_queue   = _queue.Queue()
+        self._motion_lock = threading.Lock()
         self._worker = threading.Thread(target=self._drain_queue, daemon=True)
         self._worker.start()
 
@@ -82,6 +85,7 @@ class UR7e_CubeGrasp(Node):
     def _on_joint_state(self, msg):
         with self._js_lock:
             self.joint_state = msg
+            self._js_recv_time = time.time()
 
     def _drain_queue(self):
         while True:
@@ -92,11 +96,17 @@ class UR7e_CubeGrasp(Node):
             done.set()
 
     def _submit(self, fn) -> bool:
-        done   = threading.Event()
-        result = [False]
-        self._cmd_queue.put((fn, done, result))
-        done.wait()
-        return result[0]
+        if not self._motion_lock.acquire(blocking=False):
+            self.get_logger().warn('Motion already in progress — dropping command')
+            return False
+        try:
+            done   = threading.Event()
+            result = [False]
+            self._cmd_queue.put((fn, done, result))
+            done.wait()
+            return result[0]
+        finally:
+            self._motion_lock.release()
 
     def _handle_scan_pose(self, _request, response):
         x, y, z = SCAN_POSES[self._scan_idx % len(SCAN_POSES)]
@@ -168,11 +178,19 @@ class UR7e_CubeGrasp(Node):
                            ox, oy, oz, ow)
         )
 
+    def _get_fresh_joint_state(self, max_age=0.15, timeout=2.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with self._js_lock:
+                if self.joint_state is not None and (time.time() - self._js_recv_time) < max_age:
+                    return self.joint_state
+            time.sleep(0.01)
+        self.get_logger().error('Fresh joint state not available (camera DDS load?)')
+        return None
+
     def _move(self, x, y, z, qx=0.0, qy=1.0, qz=0.0, qw=0.0) -> bool:
-        with self._js_lock:
-            js = self.joint_state
+        js = self._get_fresh_joint_state()
         if js is None:
-            self.get_logger().error('No joint state available')
             return False
 
         joint_sol = self.ik_planner.compute_ik(js, x, y, z, qx, qy, qz, qw)
@@ -185,6 +203,7 @@ class UR7e_CubeGrasp(Node):
 
         jt = traj.joint_trajectory
         self._fix_trajectory_timing(jt)
+        self._recompute_velocities(jt)
         return self._execute_traj(jt)
 
     def _fix_trajectory_timing(self, joint_traj, min_dt=0.1) -> None:
@@ -204,15 +223,43 @@ class UR7e_CubeGrasp(Node):
             t_prev = get_t(pts[i - 1])
             t_curr = get_t(pts[i]) + shift
             dt = t_curr - t_prev
-            if 0 < dt < min_dt:
-                ratio = dt / min_dt
-                if pts[i].velocities:
-                    pts[i].velocities    = [v * ratio for v in pts[i].velocities]
-                if pts[i].accelerations:
-                    pts[i].accelerations = [a * ratio * ratio for a in pts[i].accelerations]
+            if dt < min_dt:  # catches dt <= 0 (degenerate) and dt too small
+                if dt > 0:
+                    ratio = dt / min_dt
+                    if pts[i].velocities:
+                        pts[i].velocities    = [v * ratio for v in pts[i].velocities]
+                    if pts[i].accelerations:
+                        pts[i].accelerations = [a * ratio * ratio for a in pts[i].accelerations]
                 shift  += min_dt - dt
                 t_curr += min_dt - dt
             set_t(pts[i], t_curr)
+
+    def _recompute_velocities(self, joint_traj) -> None:
+        VEL_LIMITS = [2.09, 2.09, 3.14, 3.14, 3.14, 3.14]  # UR7e rad/s per joint
+
+        pts = joint_traj.points
+        n   = len(pts)
+        if n < 2:
+            return
+
+        def get_t(pt):
+            return pt.time_from_start.sec + pt.time_from_start.nanosec * 1e-9
+
+        n_j = len(pts[0].positions)
+        pts[0].velocities  = [0.0] * n_j
+        pts[-1].velocities = [0.0] * n_j
+
+        for i in range(1, n - 1):
+            dt = get_t(pts[i + 1]) - get_t(pts[i - 1])
+            vels = []
+            for j in range(n_j):
+                lim = VEL_LIMITS[j] if j < len(VEL_LIMITS) else 3.14
+                v   = (float(pts[i + 1].positions[j]) - float(pts[i - 1].positions[j])) / dt if dt > 0 else 0.0
+                vels.append(max(-lim, min(lim, v)))
+            pts[i].velocities = vels
+
+        for pt in pts:
+            pt.accelerations = []
 
     def _execute_traj(self, joint_traj) -> bool:
         done    = threading.Event()
@@ -220,8 +267,11 @@ class UR7e_CubeGrasp(Node):
 
         def on_result(future):
             try:
-                future.result().result
-                success[0] = True
+                res = future.result().result
+                if res.error_code == FollowJointTrajectory.Result.SUCCESSFUL:
+                    success[0] = True
+                else:
+                    self.get_logger().error(f'Trajectory error code: {res.error_code}')
             except Exception as e:
                 self.get_logger().error(f'Trajectory failed: {e}')
             done.set()
