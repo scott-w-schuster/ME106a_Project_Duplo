@@ -28,7 +28,6 @@ setup(
     },
     entry_points={
         'console_scripts': [
-        'ik=planning.ik:main',
         'main=planning.main:main',
         'planning_node=planning.planning_node:main',
         ],
