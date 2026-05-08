@@ -220,15 +220,17 @@ class LEGOBuildPlanner(Node):
             if not baseplate_found:
                 baseplate_found = self._baseplate_visible()
                 if baseplate_found:
-                    self.get_logger().info(f'Baseplate found at scan pose {i + 1}/{N_SCAN}.')
-                    break
+                    self.get_logger().info(
+                        f'Baseplate found at scan pose {i + 1}/{N_SCAN} — '
+                        f'now scanning for bricks.')
 
-            for brick in self._detect_bricks():
-                px = brick['pose'].pose.position.x
-                py = brick['pose'].pose.position.y
-                key = (brick['color'], brick['type'],
-                       round(px / 0.05), round(py / 0.05))
-                self._scan_inventory[key] = brick
+            if baseplate_found:
+                for brick in self._detect_bricks():
+                    px = brick['pose'].pose.position.x
+                    py = brick['pose'].pose.position.y
+                    key = (brick['color'], brick['type'],
+                           round(px / 0.05), round(py / 0.05))
+                    self._scan_inventory[key] = brick
 
         inventory = list(self._scan_inventory.values())
         self.get_logger().info(

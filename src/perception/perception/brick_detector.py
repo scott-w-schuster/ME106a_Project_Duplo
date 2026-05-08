@@ -129,6 +129,7 @@ class BrickDetectorNode(Node):
         self._gp_last_fit: float = None
         self.baseplate_z_cam = None
         self._aruco_window: list = []
+        self._last_baseplate_tf = None  # (avg_t, avg_q) cached for re-broadcast
         self._tracks: list = []
 
         self.create_subscription(
@@ -216,6 +217,20 @@ class BrickDetectorNode(Node):
                 self.get_logger().warn(
                     'Baseplate not detected (ArUco + HSV both failed)',
                     throttle_duration_sec=5.0)
+                if self._last_baseplate_tf is not None:
+                    avg_t, avg_q = self._last_baseplate_tf
+                    t                         = TransformStamped()
+                    t.header.stamp            = self.get_clock().now().to_msg()
+                    t.header.frame_id         = 'base_link'
+                    t.child_frame_id          = 'baseplate_frame'
+                    t.transform.translation.x = float(avg_t[0])
+                    t.transform.translation.y = float(avg_t[1])
+                    t.transform.translation.z = float(avg_t[2])
+                    t.transform.rotation.x    = float(avg_q[0])
+                    t.transform.rotation.y    = float(avg_q[1])
+                    t.transform.rotation.z    = float(avg_q[2])
+                    t.transform.rotation.w    = float(avg_q[3])
+                    self.tf_broadcaster.sendTransform(t)
 
         if self.latest_xyz is None or self.latest_pc_bgr is None:
             self.debug_pub.publish(self.bridge.cv2_to_imgmsg(debug, encoding='bgr8'))
@@ -840,6 +855,7 @@ class BrickDetectorNode(Node):
         t.transform.rotation.z    = float(avg_q[2])
         t.transform.rotation.w    = float(avg_q[3])
         self.tf_broadcaster.sendTransform(t)
+        self._last_baseplate_tf = (avg_t, avg_q)
 
     def _current_viewpoint(self):
         camera_frame = self.get_parameter('camera_frame').get_parameter_value().string_value
