@@ -272,7 +272,8 @@ class UR7e_CubeGrasp(Node):
 
     def _move_trajectory(self, target_positions: list, duration: float) -> bool:
         jt = JointTrajectory()
-        jt.joint_names = JOINT_NAMES
+        jt.joint_names  = JOINT_NAMES
+        jt.header.stamp = self.get_clock().now().to_msg()
 
         pt = JointTrajectoryPoint()
         pt.positions       = target_positions
