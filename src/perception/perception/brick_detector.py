@@ -6,7 +6,7 @@ from rclpy.duration import Duration
 
 import cv2
 import numpy as np
-import open3d as o3d
+from sklearn.cluster import DBSCAN
 from cv_bridge import CvBridge
 
 from sensor_msgs.msg import Image, CameraInfo, PointCloud2
@@ -333,56 +333,51 @@ class BrickDetectorNode(Node):
         return xyz, bgr
 
     def _fit_ground_plane(self, xyz: np.ndarray):
-        
         pts   = xyz.reshape(-1, 3)
         valid = pts[np.all(np.isfinite(pts), axis=1)]
         if len(valid) < 100:
             return None
 
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(valid[::PC_SUBSAMPLE])
+        sub = valid[::PC_SUBSAMPLE]
+        n   = len(sub)
 
-        try:
-            plane_model, inliers = pcd.segment_plane(
-                distance_threshold=RANSAC_INLIER_THRESH,
-                ransac_n=3,
-                num_iterations=500,
-            )
-        except Exception as e:
-            self.get_logger().warn(f'Open3D plane fit failed: {e}')
+        best_normal, best_d, best_count = None, None, 0
+        rng = np.random.default_rng(0)
+        for _ in range(500):
+            idx = rng.choice(n, 3, replace=False)
+            s   = sub[idx]
+            v1  = s[1] - s[0]
+            v2  = s[2] - s[0]
+            nrm = np.cross(v1, v2)
+            nl  = np.linalg.norm(nrm)
+            if nl < 1e-6:
+                continue
+            nrm = nrm / nl
+            d   = -float(nrm @ s[0])
+            dists   = np.abs(sub @ nrm + d)
+            n_in    = int(np.sum(dists < RANSAC_INLIER_THRESH))
+            if n_in > best_count:
+                best_count, best_normal, best_d = n_in, nrm, d
+
+        if best_count < 50:
             return None
-
-        if len(inliers) < 50:
+        if abs(best_normal[2]) < PLANE_NORMAL_MIN_Z:
             return None
-
-        a, b, c, d = plane_model
-        norm_len = np.sqrt(a*a + b*b + c*c)
-        if norm_len < 1e-6:
-            return None
-        normal = np.array([a, b, c]) / norm_len
-        d      = d / norm_len
-
-        if abs(normal[2]) < PLANE_NORMAL_MIN_Z:
-            return None
-
-        if normal[2] < 0:
-            normal, d = -normal, -d
+        if best_normal[2] < 0:
+            best_normal, best_d = -best_normal, -best_d
 
         self.get_logger().debug(
-            f'Ground plane (Open3D): normal={normal.round(3)}, d={d:.4f}, '
-            f'inliers={len(inliers)}'
-        )
-        return normal, d
+            f'Ground plane: normal={best_normal.round(3)}, d={best_d:.4f}, inliers={best_count}')
+        return best_normal, best_d
 
     def _cluster_above_table(self, xyz: np.ndarray, bgr: np.ndarray) -> list:
-       
         normal, d = self.ground_plane
         pts       = xyz.reshape(-1, 3)
         colors    = bgr.reshape(-1, 3)
 
-        valid  = np.all(np.isfinite(pts), axis=1)
-        h      = -(pts @ normal + d)
-        keep   = valid & (h > TABLE_MASK_MARGIN_M) & (h < MAX_BRICK_HEIGHT_M)
+        valid = np.all(np.isfinite(pts), axis=1)
+        h     = -(pts @ normal + d)
+        keep  = valid & (h > TABLE_MASK_MARGIN_M) & (h < MAX_BRICK_HEIGHT_M)
 
         if np.sum(keep) < DBSCAN_MIN_PTS:
             return []
@@ -390,31 +385,25 @@ class BrickDetectorNode(Node):
         above_pts = pts[keep]
         above_col = colors[keep]
 
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(above_pts)
-        pcd.colors = o3d.utility.Vector3dVector(above_col.astype(np.float64) / 255.0)
+        vox_idx  = (above_pts / VOXEL_SIZE_M).astype(np.int32)
+        _, uniq  = np.unique(vox_idx, axis=0, return_index=True)
+        pts_down    = above_pts[uniq]
+        colors_down = above_col[uniq]
 
-        pcd_down    = pcd.voxel_down_sample(voxel_size=VOXEL_SIZE_M)
-        pts_down    = np.asarray(pcd_down.points)
-        colors_down = (np.asarray(pcd_down.colors) * 255).astype(np.uint8)
+        if len(pts_down) < DBSCAN_MIN_PTS:
+            return []
 
-        labels = np.array(pcd_down.cluster_dbscan(
-            eps=DBSCAN_EPS_M,
-            min_points=DBSCAN_MIN_PTS,
-            print_progress=False,
-        ))
+        labels = DBSCAN(eps=DBSCAN_EPS_M, min_samples=DBSCAN_MIN_PTS).fit(pts_down).labels_
 
-        clusters = []
+        result = []
         for label in np.unique(labels):
             if label < 0:
                 continue
-            mask = labels == label
-            clusters.append((pts_down[mask], colors_down[mask]))
-
-        result = []
-        for pts_c, col_c in clusters:
+            mask    = labels == label
+            pts_c   = pts_down[mask]
+            col_c   = colors_down[mask]
             if self._cluster_footprint_m2(pts_c) > MAX_BRICK_FOOTPRINT_M2:
-                self.get_logger().debug('Oversized cluster detected — attempting depth split.')
+                self.get_logger().debug('Oversized cluster — attempting split.')
                 result.extend(self._split_large_cluster(pts_c, col_c))
             else:
                 result.append((pts_c, col_c))
@@ -485,13 +474,10 @@ class BrickDetectorNode(Node):
                 self.get_logger().debug('Depth seam split successful.')
                 return [(pts[side_a], colors[side_a]), (pts[~side_a], colors[~side_a])]
 
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(pts)
-        labels = np.array(pcd.cluster_dbscan(
+        labels = DBSCAN(
             eps=DBSCAN_EPS_M * 0.6,
-            min_points=max(3, DBSCAN_MIN_PTS // 2),
-            print_progress=False,
-        ))
+            min_samples=max(3, DBSCAN_MIN_PTS // 2),
+        ).fit(pts).labels_
         sub = []
         for lbl in np.unique(labels):
             if lbl < 0:
