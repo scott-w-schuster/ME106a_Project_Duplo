@@ -187,6 +187,7 @@ class LEGOBuildPlanner(Node):
             return False
 
     def _call_scan_pose(self) -> bool:
+        print('[PLANNER] sending /next_scan_pose request...', flush=True)
         done = threading.Event()
         resp = [None]
 
@@ -195,13 +196,17 @@ class LEGOBuildPlanner(Node):
                 _r[0] = future.result()
             except Exception as e:
                 self.get_logger().error(f'Scan service error: {e}')
+                print(f'[PLANNER] /next_scan_pose error: {e}', flush=True)
             _d.set()
 
         self.scan_cli.call_async(Trigger.Request()).add_done_callback(_cb)
         if not done.wait(timeout=90.0):
+            print('[PLANNER] /next_scan_pose TIMED OUT', flush=True)
             self.get_logger().warn('Scan pose timed out')
             return False
-        return resp[0] is not None and resp[0].success
+        ok = resp[0] is not None and resp[0].success
+        print(f'[PLANNER] /next_scan_pose response — ok={ok}', flush=True)
+        return ok
 
     def _full_scan(self) -> tuple:
         N_SCAN = 7
@@ -320,32 +325,47 @@ class LEGOBuildPlanner(Node):
         self._last_pick_pose  = pick_pose
         self._last_pick_color = step['color']
 
+        print(f'[PLANNER] publishing pick/place poses for step {self.current_step + 1}', flush=True)
         self.pick_pub.publish(pick_pose)
         self.place_pub.publish(place_pose)
+        print('[PLANNER] sending /move_to_pregrasp request...', flush=True)
         self.pregrasp_cli.call_async(Trigger.Request()).add_done_callback(self._on_pregrasp)
 
     def _on_pregrasp(self, future):
+        print('[PLANNER] /move_to_pregrasp response received', flush=True)
         if not self._ok(future, 'pregrasp'):
+            print('[PLANNER] pregrasp FAILED — stopping step', flush=True)
             return
+        print('[PLANNER] pregrasp OK → sending /grasp request...', flush=True)
         self.grasp_cli.call_async(Trigger.Request()).add_done_callback(self._on_grasp)
 
     def _on_grasp(self, future):
+        print('[PLANNER] /grasp response received', flush=True)
         if not self._ok(future, 'grasp'):
+            print('[PLANNER] grasp FAILED — stopping step', flush=True)
             return
+        print('[PLANNER] grasp OK → sending /move_to_check request...', flush=True)
         self.check_cli.call_async(Trigger.Request()).add_done_callback(self._on_check)
 
     def _on_check(self, future):
+        print('[PLANNER] /move_to_check response received', flush=True)
         if not self._ok(future, 'move_to_check'):
+            print('[PLANNER] check FAILED — stopping step', flush=True)
             return
         if not self._verify_pickup():
+            print('[PLANNER] pickup verification FAILED — retrying step', flush=True)
             self.get_logger().error('Pickup verification failed — retrying step')
             self._execute_step()
             return
+        print('[PLANNER] check OK → sending /preplace_and_place request...', flush=True)
         self.place_cli.call_async(Trigger.Request()).add_done_callback(self._on_place)
 
     def _on_place(self, future):
+        print('[PLANNER] /preplace_and_place response received', flush=True)
         if not self._ok(future, 'place'):
+            print('[PLANNER] place FAILED — stopping step', flush=True)
             return
+        print(f'[PLANNER] step {self.current_step + 1} complete → advancing', flush=True)
         self.current_step += 1
         self._execute_step()
 
@@ -436,8 +456,10 @@ class LEGOBuildPlanner(Node):
             resp = future.result()
             if resp.success:
                 return True
+            print(f'[PLANNER] {step_name} returned failure: "{resp.message}"', flush=True)
             self.get_logger().error(f'{step_name} failed: {resp.message}')
         except Exception as e:
+            print(f'[PLANNER] {step_name} exception: {e}', flush=True)
             self.get_logger().error(f'{step_name} service error: {e}')
         return False
 

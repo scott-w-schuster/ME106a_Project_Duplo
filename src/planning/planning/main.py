@@ -190,6 +190,7 @@ class UR7e_CubeGrasp(Node):
 
     def _submit(self, fn) -> bool:
         if not self._motion_lock.acquire(blocking=False):
+            print('[MAIN] *** DROPPED — motion already in progress ***', flush=True)
             self.get_logger().warn('Motion already in progress — dropping command')
             return False
         try:
@@ -204,25 +205,36 @@ class UR7e_CubeGrasp(Node):
     def _handle_scan_pose(self, _req, response):
         x, y, z = SCAN_POSES[self._scan_idx % len(SCAN_POSES)]
         self._scan_idx += 1
+        print(f'[MAIN] /next_scan_pose received → target ({x:.3f}, {y:.3f}, {z:.3f})', flush=True)
         self.get_logger().info(f'[SCAN] → ({x:.3f}, {y:.3f}, {z:.3f})')
         ok = self._submit(lambda: self._move(x, y, z))
+        print(f'[MAIN] /next_scan_pose done — ok={ok}', flush=True)
         return self._result(response, ok, 'scan_pose')
 
     def _handle_pregrasp(self, _req, response):
+        print('[MAIN] /move_to_pregrasp received', flush=True)
         if self.pick_pose is None:
+            print('[MAIN] /move_to_pregrasp FAILED — no pick pose', flush=True)
             return self._fail(response, 'No pick pose received')
         p = self.pick_pose.pose
+        print(f'[MAIN] pre-grasp target: ({p.position.x:.3f}, {p.position.y:.3f}, '
+              f'{p.position.z + self.PRE_GRASP_OFFSET:.3f})', flush=True)
         ok = self._submit(lambda: self._move(
             p.position.x, p.position.y, p.position.z + self.PRE_GRASP_OFFSET,
             p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w,
         ))
+        print(f'[MAIN] /move_to_pregrasp done — ok={ok}', flush=True)
         return self._result(response, ok, 'pregrasp')
 
     def _handle_grasp(self, _req, response):
+        print('[MAIN] /grasp received', flush=True)
         if self.pick_pose is None:
+            print('[MAIN] /grasp FAILED — no pick pose', flush=True)
             return self._fail(response, 'No pick pose received')
         p  = self.pick_pose.pose
         ox, oy, oz, ow = p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w
+        print(f'[MAIN] grasp target: ({p.position.x:.3f}, {p.position.y:.3f}, '
+              f'{p.position.z + self.GRASP_OFFSET:.3f})', flush=True)
         ok = self._submit(lambda: (
             self._toggle_gripper()
             and self._move(p.position.x, p.position.y, p.position.z + self.GRASP_OFFSET,
@@ -231,17 +243,24 @@ class UR7e_CubeGrasp(Node):
             and self._move(p.position.x, p.position.y, p.position.z + self.PRE_GRASP_OFFSET,
                            ox, oy, oz, ow)
         ))
+        print(f'[MAIN] /grasp done — ok={ok}', flush=True)
         return self._result(response, ok, 'grasp')
 
     def _handle_check(self, _req, response):
+        print(f'[MAIN] /move_to_check received → ({CHECK_X}, {CHECK_Y}, {CHECK_Z})', flush=True)
         ok = self._submit(lambda: self._move(CHECK_X, CHECK_Y, CHECK_Z))
+        print(f'[MAIN] /move_to_check done — ok={ok}', flush=True)
         return self._result(response, ok, 'move_to_check')
 
     def _handle_place(self, _req, response):
+        print('[MAIN] /preplace_and_place received', flush=True)
         if self.place_pose is None:
+            print('[MAIN] /preplace_and_place FAILED — no place pose', flush=True)
             return self._fail(response, 'No place pose received')
         p  = self.place_pose.pose
         ox, oy, oz, ow = p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w
+        print(f'[MAIN] place target: ({p.position.x:.3f}, {p.position.y:.3f}, '
+              f'{p.position.z + self.PLACE_OFFSET:.3f})', flush=True)
         ok = self._submit(lambda: (
             self._move(p.position.x, p.position.y, p.position.z + self.PRE_PLACE_OFFSET,
                        ox, oy, oz, ow)
@@ -251,6 +270,7 @@ class UR7e_CubeGrasp(Node):
             and self._move(p.position.x, p.position.y, p.position.z + self.PRE_PLACE_OFFSET,
                            ox, oy, oz, ow)
         ))
+        print(f'[MAIN] /preplace_and_place done — ok={ok}', flush=True)
         return self._result(response, ok, 'place')
 
     def _move(self, x, y, z, qx=0.0, qy=1.0, qz=0.0, qw=0.0,
@@ -258,19 +278,25 @@ class UR7e_CubeGrasp(Node):
         if duration is None:
             duration = self.MOVE_DURATION
 
+        print(f'[MAIN] _move → ({x:.3f}, {y:.3f}, {z:.3f}) dur={duration:.1f}s', flush=True)
         joint_sol = self.compute_ik(x, y, z, qx, qy, qz, qw)
         if joint_sol is None:
+            print('[MAIN] _move FAILED — IK returned None', flush=True)
             return False
 
         target = self._extract_positions(joint_sol)
         if target is None:
+            print('[MAIN] _move FAILED — could not extract joint positions', flush=True)
             return False
 
         if self.controller_type == 'pid':
+            print('[MAIN] executing PID move', flush=True)
             return self._move_pid(target, duration)
+        print('[MAIN] executing trajectory move', flush=True)
         return self._move_trajectory(target, duration)
 
     def _move_trajectory(self, target_positions: list, duration: float) -> bool:
+        print(f'[MAIN] sending trajectory (dur={duration:.1f}s)...', flush=True)
         jt = JointTrajectory()
         jt.joint_names  = JOINT_NAMES
         jt.header.stamp = self.get_clock().now().to_msg()
@@ -284,13 +310,17 @@ class UR7e_CubeGrasp(Node):
         )
         jt.points.append(pt)
 
-        return self.trajectory_controller.execute_joint_trajectory(
+        result = self.trajectory_controller.execute_joint_trajectory(
             jt, timeout=duration + 10.0)
+        print(f'[MAIN] trajectory done — ok={result}', flush=True)
+        return result
 
     def _move_pid(self, target_positions: list, duration: float,
                   control_hz: float = 10.0) -> bool:
+        print(f'[MAIN] starting PID move (dur={duration:.1f}s, hz={control_hz})', flush=True)
         js = self._get_fresh_joint_state()
         if js is None:
+            print('[MAIN] PID FAILED — no fresh joint state', flush=True)
             return False
 
         start_dict = dict(zip(js.name, js.position))
@@ -335,10 +365,13 @@ class UR7e_CubeGrasp(Node):
 
         vel_msg.data = [0.0] * 6
         self._velocity_pub.publish(vel_msg)
+        print('[MAIN] PID move done', flush=True)
         return True
 
     def _toggle_gripper(self) -> bool:
+        print('[MAIN] toggling gripper...', flush=True)
         if not self.gripper_cli.wait_for_service(timeout_sec=5.0):
+            print('[MAIN] gripper FAILED — service unavailable', flush=True)
             self.get_logger().error('Gripper service unavailable')
             return False
 
@@ -351,8 +384,10 @@ class UR7e_CubeGrasp(Node):
 
         self.gripper_cli.call_async(Trigger.Request()).add_done_callback(_cb)
         done.wait(timeout=5.0)
+        ok = result[0] is not None
+        print(f'[MAIN] gripper toggle done — ok={ok}', flush=True)
         self.get_logger().info('Gripper toggled')
-        return result[0] is not None
+        return ok
 
     def _result(self, response, ok: bool, step: str):
         response.success = ok
