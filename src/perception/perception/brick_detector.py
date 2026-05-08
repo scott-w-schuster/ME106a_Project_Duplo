@@ -6,7 +6,7 @@ from rclpy.duration import Duration
 
 import cv2
 import numpy as np
-from sklearn.cluster import DBSCAN
+import open3d as o3d
 from cv_bridge import CvBridge
 
 from sensor_msgs.msg import Image, CameraInfo, PointCloud2
@@ -24,7 +24,7 @@ COLOR_RANGES = {
     'orange':       [(( 87, 146, 156), (202, 183, 183))],
     'yellow':       [((122, 113, 151), (207, 146, 191))],
     'light_green':  [(( 97,  85, 128), (161, 110, 166))],
-    'blue':     [(( 88, 106,  80), (172, 126, 103))],
+    'blue':         [(( 88, 106,  80), (172, 126, 103))],
     'mint':         [((111,  87, 117), (228, 114, 134))],
     'white':        [((167, 113,  93), (209, 140, 118))],
     'purple':       [(( 89, 129,  77), (169, 151, 116))],
@@ -33,14 +33,12 @@ COLOR_RANGES = {
     'light_blue':   [((132, 105,  85), (255, 140, 130))],
 }
 
-
-
 BRICK_COLORS_RGBA = {
     'red':         (1.00, 0.15, 0.15, 1.0),
     'orange':      (1.00, 0.50, 0.00, 1.0),
     'yellow':      (1.00, 0.90, 0.00, 1.0),
     'light_green': (0.50, 1.00, 0.20, 1.0),
-    'blue':    (0.30, 0.70, 1.00, 1.0),
+    'blue':        (0.30, 0.70, 1.00, 1.0),
     'mint':        (0.60, 1.00, 0.82, 1.0),
     'white':       (0.95, 0.95, 0.95, 1.0),
     'purple':      (0.60, 0.20, 0.85, 1.0),
@@ -49,17 +47,15 @@ BRICK_COLORS_RGBA = {
     'light_blue':  (0.68, 0.85, 0.90, 1.0),
 }
 
-
-BASEPLATE_HSV_LOWER   = (35,  60,  30)
-BASEPLATE_HSV_UPPER   = (85, 255, 220)
+BASEPLATE_HSV_LOWER   = (55,  80,  30)
+BASEPLATE_HSV_UPPER   = (80, 200, 100)
 BASEPLATE_MIN_AREA_PX = 5000
 
 ARUCO_DICT_ID       = cv2.aruco.DICT_4X4_50
 ARUCO_MARKER_ID     = 0
 ARUCO_MARKER_SIZE_M = 0.05
 
-
-STUD_PITCH_M   = 0.016
+STUD_PITCH_M           = 0.016
 STUD_MIN_RADIUS_PX     = 5
 STUD_MAX_RADIUS_PX     = 20
 STUD_MIN_DIST_PX       = 15
@@ -89,37 +85,32 @@ HEIGHT_THRESHOLDS = {
     'tall':   (0.030, 9.999),
 }
 
-PC_SUBSAMPLE          = 8       
-RANSAC_INLIER_THRESH  = 0.008  
-PLANE_NORMAL_MIN_Z    = 0.85    
-HEIGHT_PERCENTILE     = 90      
-MIN_CLUSTER_PTS       = 10      
+PC_SUBSAMPLE          = 8
+RANSAC_INLIER_THRESH  = 0.008
+PLANE_NORMAL_MIN_Z    = 0.85
+HEIGHT_PERCENTILE     = 90
+MIN_CLUSTER_PTS       = 10
 
+TABLE_MASK_MARGIN_M   = 0.006
+MAX_BRICK_HEIGHT_M    = 0.060
 
-TABLE_MASK_MARGIN_M   = 0.006   
-MAX_BRICK_HEIGHT_M    = 0.060   
-
-VOXEL_SIZE_M          = 0.004   
+VOXEL_SIZE_M          = 0.004
 DBSCAN_EPS_M          = 0.012
-DBSCAN_MIN_PTS        = 10      
-
+DBSCAN_MIN_PTS        = 10
 
 COLOR_MATCH_MIN_FRAC  = 0.40
 
 TF_TIMEOUT_SEC = 1.0
 
-
 GROUND_PLANE_REFIT_SECS = 2.0
 
-ARUCO_WINDOW = 8   # rolling window of ArUco detections to average for stable baseplate TF
+ARUCO_WINDOW = 8
 
-
-
-EMA_ALPHA             = 0.15
-TRACK_MAX_STALE       = 300
-TRACK_MATCH_DIST_M    = 0.025
-TRACK_MIN_VIEWPOINTS  = 2
-VIEWPOINT_BUCKET_M    = 0.05
+EMA_ALPHA          = 0.15
+TRACK_MAX_STALE    = 300
+TRACK_MATCH_DIST_M = 0.025
+TRACK_MIN_VIEWPOINTS = 2
+VIEWPOINT_BUCKET_M = 0.05
 
 
 class BrickDetectorNode(Node):
@@ -132,35 +123,25 @@ class BrickDetectorNode(Node):
         self.dist_coeffs = np.zeros(5, dtype=np.float32)
         self.latest_rgb   = None
         self.latest_depth = None
-
         self.latest_xyz   = None
-        
         self.latest_pc_bgr = None
-
-  
         self.ground_plane = None
-
         self._gp_last_fit: float = None
-
         self.baseplate_z_cam = None
-
-        self._aruco_detector  = self._build_aruco_detector()
-        self._aruco_dict      = cv2.aruco.getPredefinedDictionary(ARUCO_DICT_ID)
         self._aruco_window: list = []
-
         self._tracks: list = []
 
         self.create_subscription(
-            Image,        '/camera/camera/color/image_raw',
+            Image,       '/camera/camera/color/image_raw',
             self.rgb_callback, 10)
         self.create_subscription(
-            Image,        '/camera/camera/aligned_depth_to_color/image_raw',
+            Image,       '/camera/camera/aligned_depth_to_color/image_raw',
             self.depth_callback, 10)
         self.create_subscription(
-            CameraInfo,   '/camera/camera/color/camera_info',
+            CameraInfo,  '/camera/camera/color/camera_info',
             self.camera_info_callback, 10)
         self.create_subscription(
-            PointCloud2,  '/camera/camera/depth/color/points',
+            PointCloud2, '/camera/camera/depth/color/points',
             self.pointcloud_callback, 10)
 
         self.pose_pub        = self.create_publisher(PoseArray,   '/detected_bricks',      10)
@@ -181,22 +162,6 @@ class BrickDetectorNode(Node):
         self.create_timer(2.0, self._validate_camera_frame)
         self.get_logger().info('BrickDetectorNode initialized.')
 
-
-
-    @staticmethod
-    def _build_aruco_detector():
-        try:
-            aruco_dict = cv2.aruco.getPredefinedDictionary(ARUCO_DICT_ID)
-            params     = cv2.aruco.DetectorParameters()
-            params.minMarkerPerimeterRate    = 0.01
-            params.adaptiveThreshWinSizeMin  = 3
-            params.adaptiveThreshWinSizeMax  = 23
-            params.adaptiveThreshWinSizeStep = 10
-            params.errorCorrectionRate       = 0.8
-            return cv2.aruco.ArucoDetector(aruco_dict, params)
-        except AttributeError:
-            return None
-
     def _validate_camera_frame(self):
         if self._frame_validated:
             return
@@ -213,8 +178,8 @@ class BrickDetectorNode(Node):
             )
 
     def camera_info_callback(self, msg: CameraInfo):
-        self.fx = msg.k[0];  self.fy = msg.k[4]
-        self.cx = msg.k[2];  self.cy = msg.k[5]
+        self.fx = msg.k[0]; self.fy = msg.k[4]
+        self.cx = msg.k[2]; self.cy = msg.k[5]
         if msg.d:
             self.dist_coeffs = np.array(msg.d, dtype=np.float32)
 
@@ -227,7 +192,6 @@ class BrickDetectorNode(Node):
 
     def pointcloud_callback(self, msg: PointCloud2):
         self.latest_xyz, self.latest_pc_bgr = self._unpack_pointcloud(msg)
-
 
     def process(self):
         if self.latest_rgb is None:
@@ -250,7 +214,7 @@ class BrickDetectorNode(Node):
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 0), 2)
             else:
                 self.get_logger().warn(
-                    'Baseplate not detected (HSV + ArUco both failed)',
+                    'Baseplate not detected (ArUco + HSV both failed)',
                     throttle_duration_sec=5.0)
 
         if self.latest_xyz is None or self.latest_pc_bgr is None:
@@ -320,21 +284,16 @@ class BrickDetectorNode(Node):
         self.publish_markers(bricks_base)
         self.debug_pub.publish(self.bridge.cv2_to_imgmsg(debug, encoding='bgr8'))
 
-
     def _unpack_pointcloud(self, msg: PointCloud2):
-        
         H, W     = msg.height, msg.width
         step     = msg.point_step
         n_floats = step // 4
-
-        fields = {f.name: f.offset // 4 for f in msg.fields}
-
-        data = np.frombuffer(msg.data, dtype=np.float32).reshape(H * W, n_floats)
+        fields   = {f.name: f.offset // 4 for f in msg.fields}
+        data     = np.frombuffer(msg.data, dtype=np.float32).reshape(H * W, n_floats)
 
         x = data[:, fields['x']].reshape(H, W)
         y = data[:, fields['y']].reshape(H, W)
         z = data[:, fields['z']].reshape(H, W)
-
         xyz = np.stack([x, y, z], axis=2)
         xyz[~np.isfinite(xyz)] = np.nan
 
@@ -343,7 +302,6 @@ class BrickDetectorNode(Node):
         g = ((rgb_u32 >>  8) & 0xFF).astype(np.uint8).reshape(H, W)
         b = (rgb_u32         & 0xFF).astype(np.uint8).reshape(H, W)
         bgr = np.stack([b, g, r], axis=2)
-
         return xyz, bgr
 
     def _fit_ground_plane(self, xyz: np.ndarray):
@@ -352,46 +310,46 @@ class BrickDetectorNode(Node):
         if len(valid) < 100:
             return None
 
-        sub = valid[::PC_SUBSAMPLE]
-        n   = len(sub)
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(valid[::PC_SUBSAMPLE])
 
-        best_normal, best_d, best_count = None, None, 0
-        rng = np.random.default_rng(0)
-        for _ in range(500):
-            idx = rng.choice(n, 3, replace=False)
-            s   = sub[idx]
-            v1  = s[1] - s[0]
-            v2  = s[2] - s[0]
-            nrm = np.cross(v1, v2)
-            nl  = np.linalg.norm(nrm)
-            if nl < 1e-6:
-                continue
-            nrm = nrm / nl
-            d   = -float(nrm @ s[0])
-            dists   = np.abs(sub @ nrm + d)
-            n_in    = int(np.sum(dists < RANSAC_INLIER_THRESH))
-            if n_in > best_count:
-                best_count, best_normal, best_d = n_in, nrm, d
+        try:
+            plane_model, inliers = pcd.segment_plane(
+                distance_threshold=RANSAC_INLIER_THRESH,
+                ransac_n=3,
+                num_iterations=500,
+            )
+        except Exception as e:
+            self.get_logger().warn(f'Open3D plane fit failed: {e}')
+            return None
 
-        if best_count < 50:
+        if len(inliers) < 50:
             return None
-        if abs(best_normal[2]) < PLANE_NORMAL_MIN_Z:
+
+        a, b, c, d = plane_model
+        norm_len = np.sqrt(a*a + b*b + c*c)
+        if norm_len < 1e-6:
             return None
-        if best_normal[2] < 0:
-            best_normal, best_d = -best_normal, -best_d
+        normal = np.array([a, b, c]) / norm_len
+        d      = d / norm_len
+
+        if abs(normal[2]) < PLANE_NORMAL_MIN_Z:
+            return None
+        if normal[2] < 0:
+            normal, d = -normal, -d
 
         self.get_logger().debug(
-            f'Ground plane: normal={best_normal.round(3)}, d={best_d:.4f}, inliers={best_count}')
-        return best_normal, best_d
+            f'Ground plane: normal={normal.round(3)}, d={d:.4f}, inliers={len(inliers)}')
+        return normal, d
 
     def _cluster_above_table(self, xyz: np.ndarray, bgr: np.ndarray) -> list:
         normal, d = self.ground_plane
         pts       = xyz.reshape(-1, 3)
         colors    = bgr.reshape(-1, 3)
 
-        valid = np.all(np.isfinite(pts), axis=1)
-        h     = -(pts @ normal + d)
-        keep  = valid & (h > TABLE_MASK_MARGIN_M) & (h < MAX_BRICK_HEIGHT_M)
+        valid  = np.all(np.isfinite(pts), axis=1)
+        h      = -(pts @ normal + d)
+        keep   = valid & (h > TABLE_MASK_MARGIN_M) & (h < MAX_BRICK_HEIGHT_M)
 
         if np.sum(keep) < DBSCAN_MIN_PTS:
             return []
@@ -399,15 +357,19 @@ class BrickDetectorNode(Node):
         above_pts = pts[keep]
         above_col = colors[keep]
 
-        vox_idx  = (above_pts / VOXEL_SIZE_M).astype(np.int32)
-        _, uniq  = np.unique(vox_idx, axis=0, return_index=True)
-        pts_down    = above_pts[uniq]
-        colors_down = above_col[uniq]
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(above_pts)
+        pcd.colors = o3d.utility.Vector3dVector(above_col.astype(np.float64) / 255.0)
 
-        if len(pts_down) < DBSCAN_MIN_PTS:
-            return []
+        pcd_down    = pcd.voxel_down_sample(voxel_size=VOXEL_SIZE_M)
+        pts_down    = np.asarray(pcd_down.points)
+        colors_down = (np.asarray(pcd_down.colors) * 255).astype(np.uint8)
 
-        labels = DBSCAN(eps=DBSCAN_EPS_M, min_samples=DBSCAN_MIN_PTS).fit(pts_down).labels_
+        labels = np.array(pcd_down.cluster_dbscan(
+            eps=DBSCAN_EPS_M,
+            min_points=DBSCAN_MIN_PTS,
+            print_progress=False,
+        ))
 
         result = []
         for label in np.unique(labels):
@@ -417,7 +379,7 @@ class BrickDetectorNode(Node):
             pts_c   = pts_down[mask]
             col_c   = colors_down[mask]
             if self._cluster_footprint_m2(pts_c) > MAX_BRICK_FOOTPRINT_M2:
-                self.get_logger().debug('Oversized cluster — attempting split.')
+                self.get_logger().debug('Oversized cluster detected — attempting depth split.')
                 result.extend(self._split_large_cluster(pts_c, col_c))
             else:
                 result.append((pts_c, col_c))
@@ -429,8 +391,8 @@ class BrickDetectorNode(Node):
         normal, _ = self.ground_plane
         ref = (np.array([1.0, 0.0, 0.0]) if abs(normal[0]) < 0.9
                else np.array([0.0, 1.0, 0.0]))
-        v1 = np.cross(normal, ref);  v1 /= np.linalg.norm(v1)
-        v2 = np.cross(normal, v1);   v2 /= np.linalg.norm(v2)
+        v1 = np.cross(normal, ref); v1 /= np.linalg.norm(v1)
+        v2 = np.cross(normal, v1);  v2 /= np.linalg.norm(v2)
         proj = np.column_stack([pts @ v1, pts @ v2]).astype(np.float32)
         hull = cv2.convexHull(proj.reshape(-1, 1, 2))
         return float(cv2.contourArea(hull))
@@ -442,14 +404,13 @@ class BrickDetectorNode(Node):
         normal, _ = self.ground_plane
         ref = (np.array([1.0, 0.0, 0.0]) if abs(normal[0]) < 0.9
                else np.array([0.0, 1.0, 0.0]))
-        v1 = np.cross(normal, ref);  v1 /= np.linalg.norm(v1)
-        v2 = np.cross(normal, v1);   v2 /= np.linalg.norm(v2)
+        v1 = np.cross(normal, ref); v1 /= np.linalg.norm(v1)
+        v2 = np.cross(normal, v1);  v2 /= np.linalg.norm(v2)
 
         proj_2d  = np.column_stack([pts @ v1, pts @ v2])
         centered = proj_2d - proj_2d.mean(axis=0)
         _, _, Vt = np.linalg.svd(centered, full_matrices=False)
         long_2d  = Vt[0]
-
         long_3d  = long_2d[0] * v1 + long_2d[1] * v2
         long_3d /= np.linalg.norm(long_3d)
 
@@ -488,10 +449,13 @@ class BrickDetectorNode(Node):
                 self.get_logger().debug('Depth seam split successful.')
                 return [(pts[side_a], colors[side_a]), (pts[~side_a], colors[~side_a])]
 
-        labels = DBSCAN(
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(pts)
+        labels = np.array(pcd.cluster_dbscan(
             eps=DBSCAN_EPS_M * 0.6,
-            min_samples=max(3, DBSCAN_MIN_PTS // 2),
-        ).fit(pts).labels_
+            min_points=max(3, DBSCAN_MIN_PTS // 2),
+            print_progress=False,
+        ))
         sub = []
         for lbl in np.unique(labels):
             if lbl < 0:
@@ -501,7 +465,6 @@ class BrickDetectorNode(Node):
         return sub if len(sub) > 1 else [(pts, colors)]
 
     def _classify_cluster_color(self, cluster_bgr: np.ndarray):
-
         lab_pts = cv2.cvtColor(
             cluster_bgr.reshape(1, -1, 3), cv2.COLOR_BGR2LAB
         ).reshape(-1, 3).astype(np.float32)
@@ -557,8 +520,8 @@ class BrickDetectorNode(Node):
         normal, _ = self.ground_plane
         ref = (np.array([1.0, 0.0, 0.0]) if abs(normal[0]) < 0.9
                else np.array([0.0, 1.0, 0.0]))
-        v1 = np.cross(normal, ref);  v1 /= np.linalg.norm(v1)
-        v2 = np.cross(normal, v1);   v2 /= np.linalg.norm(v2)
+        v1 = np.cross(normal, ref); v1 /= np.linalg.norm(v1)
+        v2 = np.cross(normal, v1);  v2 /= np.linalg.norm(v2)
 
         proj     = np.column_stack([cluster_pts @ v1, cluster_pts @ v2])
         centered = proj - proj.mean(axis=0)
@@ -584,7 +547,7 @@ class BrickDetectorNode(Node):
         u = (pts[:, 0] / pts[:, 2] * self.fx + self.cx).astype(np.int32)
         v = (pts[:, 1] / pts[:, 2] * self.fy + self.cy).astype(np.int32)
 
-        H, W = self.latest_rgb.shape[:2]
+        H, W   = self.latest_rgb.shape[:2]
         in_img = (u >= 0) & (u < W) & (v >= 0) & (v < H)
         if not np.any(in_img):
             return None
@@ -643,8 +606,8 @@ class BrickDetectorNode(Node):
         normal, _ = self.ground_plane
         ref = (np.array([1.0, 0.0, 0.0]) if abs(normal[0]) < 0.9
                else np.array([0.0, 1.0, 0.0]))
-        v1 = np.cross(normal, ref);  v1 /= np.linalg.norm(v1)
-        v2 = np.cross(normal, v1);   v2 /= np.linalg.norm(v2)
+        v1 = np.cross(normal, ref); v1 /= np.linalg.norm(v1)
+        v2 = np.cross(normal, v1);  v2 /= np.linalg.norm(v2)
         proj     = np.column_stack([cluster_pts @ v1, cluster_pts @ v2])
         centered = proj - proj.mean(axis=0)
         _, _, Vt = np.linalg.svd(centered, full_matrices=False)
@@ -664,8 +627,8 @@ class BrickDetectorNode(Node):
         Z   = pts[:, 2]
         u   = (pts[:, 0] / Z * self.fx + self.cx).astype(np.int32)
         v   = (pts[:, 1] / Z * self.fy + self.cy).astype(np.int32)
-        H, W    = debug.shape[:2]
-        in_img  = (u >= 0) & (u < W) & (v >= 0) & (v < H)
+        H, W   = debug.shape[:2]
+        in_img = (u >= 0) & (u < W) & (v >= 0) & (v < H)
         if not np.any(in_img):
             return
         px   = np.column_stack([u[in_img], v[in_img]])
@@ -684,14 +647,14 @@ class BrickDetectorNode(Node):
                 return label
         return 'normal'
 
-
     def detect_baseplate_aruco(self, rgb: np.ndarray):
         if self.fx is None:
             return None
 
         gray = cv2.cvtColor(rgb, cv2.COLOR_BGR2GRAY)
-        clahe      = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-        gray_clahe = clahe.apply(gray)
+        clahe           = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        gray_clahe      = clahe.apply(gray)
+        gray_blur_clahe = clahe.apply(cv2.GaussianBlur(gray, (5, 5), 1.0))
 
         try:
             self.aruco_debug_pub.publish(
@@ -699,34 +662,59 @@ class BrickDetectorNode(Node):
         except Exception:
             pass
 
-        for label, img in (('raw', gray), ('clahe', gray_clahe)):
-            result = self._aruco_detect_on(img, label)
+        attempts = [
+            ('raw+permissive',        gray,            0.01, 3,   53,  4),
+            ('clahe+permissive',      gray_clahe,      0.01, 3,   53,  4),
+            ('raw+default',           gray,            0.03, 3,   23, 10),
+            ('clahe+default',         gray_clahe,      0.03, 3,   23, 10),
+            ('blur_clahe+permissive', gray_blur_clahe, 0.01, 3,   53,  4),
+            ('raw+wide',              gray,            0.01, 3,  103,  8),
+        ]
+
+        for label, img, min_perim, amin, amax, astep in attempts:
+            result = self._aruco_detect_on(img, label, min_perim, amin, amax, astep)
             if result is not None:
                 return result
 
         self.get_logger().warn(
-            'ArUco: marker ID 0 not found — check DICT_4X4_50 tag is visible and well-lit',
+            'ArUco: no markers detected after all attempts — '
+            'check DICT_4X4_50 marker ID 0 is visible and well-lit',
             throttle_duration_sec=5.0)
         return None
 
-    def _aruco_detect_on(self, gray: np.ndarray, label: str):
+    def _aruco_detect_on(self, gray: np.ndarray, label: str,
+                         min_perim: float = 0.01,
+                         adapt_min: int = 3, adapt_max: int = 53, adapt_step: int = 4):
         try:
-            if self._aruco_detector is not None:
-                corners, ids, _ = self._aruco_detector.detectMarkers(gray)
-            else:
-                corners, ids, _ = cv2.aruco.detectMarkers(
-                    gray, self._aruco_dict,
-                    parameters=cv2.aruco.DetectorParameters_create())
-        except Exception as e:
-            self.get_logger().warn(f'ArUco detect error [{label}]: {e}',
-                                   throttle_duration_sec=5.0)
-            return None
+            aruco_dict = cv2.aruco.getPredefinedDictionary(ARUCO_DICT_ID)
+            params     = cv2.aruco.DetectorParameters()
+            params.minMarkerPerimeterRate    = min_perim
+            params.adaptiveThreshWinSizeMin  = adapt_min
+            params.adaptiveThreshWinSizeMax  = adapt_max
+            params.adaptiveThreshWinSizeStep = adapt_step
+            params.errorCorrectionRate       = 0.8
+            try:
+                params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+            except AttributeError:
+                pass
+            detector = cv2.aruco.ArucoDetector(aruco_dict, params)
+            corners, ids, _ = detector.detectMarkers(gray)
+        except AttributeError:
+            aruco_dict = cv2.aruco.Dictionary_get(ARUCO_DICT_ID)
+            params     = cv2.aruco.DetectorParameters_create()
+            params.minMarkerPerimeterRate    = min_perim
+            params.adaptiveThreshWinSizeMin  = adapt_min
+            params.adaptiveThreshWinSizeMax  = adapt_max
+            params.adaptiveThreshWinSizeStep = adapt_step
+            params.errorCorrectionRate       = 0.8
+            corners, ids, _ = cv2.aruco.detectMarkers(gray, aruco_dict, parameters=params)
 
         if ids is None:
             return None
 
         self.get_logger().info(
-            f'ArUco [{label}]: found markers {ids.flatten().tolist()}',
+            f'ArUco [{label}]: found markers {ids.flatten().tolist()} — '
+            f'looking for ID {ARUCO_MARKER_ID}',
             throttle_duration_sec=2.0)
 
         cam_mat = np.array([[self.fx, 0, self.cx],
@@ -737,10 +725,12 @@ class BrickDetectorNode(Node):
             if mid != ARUCO_MARKER_ID:
                 continue
             half    = ARUCO_MARKER_SIZE_M / 2.0
-            obj_pts = np.array([[-half,  half, 0],
-                                 [ half,  half, 0],
-                                 [ half, -half, 0],
-                                 [-half, -half, 0]], dtype=np.float32)
+            obj_pts = np.array([
+                [-half,  half, 0],
+                [ half,  half, 0],
+                [ half, -half, 0],
+                [-half, -half, 0],
+            ], dtype=np.float32)
             _, rvec, tvec = cv2.solvePnP(
                 obj_pts, corners[i].reshape(4, 2), cam_mat, self.dist_coeffs)
             rvec     = rvec.flatten()
@@ -773,7 +763,7 @@ class BrickDetectorNode(Node):
             return None
 
         largest = max(contours, key=cv2.contourArea)
-        area = cv2.contourArea(largest)
+        area    = cv2.contourArea(largest)
         if area < BASEPLATE_MIN_AREA_PX:
             self.get_logger().warn(
                 f'HSV baseplate: largest contour {area:.0f}px < {BASEPLATE_MIN_AREA_PX}px minimum',
@@ -785,12 +775,13 @@ class BrickDetectorNode(Node):
         if w_px < h_px: angle_deg += 90.0
         box_pts = np.int0(cv2.boxPoints(rect))
 
-        ci, ri  = int(cx_px), int(cy_px)
-        ih, iw  = depth.shape
-        window  = depth[max(0,ri-5):min(ih,ri+6), max(0,ci-5):min(iw,ci+6)]
-        valid   = window[(window > 0) & np.isfinite(window)]
-        if len(valid) == 0: return None
-        Z = float(np.median(valid))
+        ci, ri = int(cx_px), int(cy_px)
+        ih, iw = depth.shape
+        window = depth[max(0,ri-5):min(ih,ri+6), max(0,ci-5):min(iw,ci+6)]
+        valid  = window[(window > 0) & np.isfinite(window)]
+        if len(valid) == 0:
+            return None
+        Z       = float(np.median(valid))
         cam_mat = np.array([[self.fx, 0, self.cx], [0, self.fy, self.cy], [0, 0, 1]], np.float32)
         undist  = cv2.undistortPoints(
             np.array([[[cx_px, cy_px]]], dtype=np.float32), cam_mat, self.dist_coeffs, P=cam_mat)
@@ -832,7 +823,7 @@ class BrickDetectorNode(Node):
 
         avg_t = np.mean([s[0] for s in self._aruco_window], axis=0)
         quats = np.array([s[1] for s in self._aruco_window])
-        ref = quats[0]
+        ref   = quats[0]
         quats[np.dot(quats, ref) < 0] *= -1
         avg_q = quats.mean(axis=0)
         avg_q /= np.linalg.norm(avg_q)
@@ -869,7 +860,7 @@ class BrickDetectorNode(Node):
         viewpoint = self._current_viewpoint()
 
         for brick in bricks_base:
-            px        = brick['pose_base'].position
+            px       = brick['pose_base'].position
             best_idx  = None
             best_dist = TRACK_MATCH_DIST_M
 
@@ -928,13 +919,11 @@ class BrickDetectorNode(Node):
             return tf2_geometry_msgs.do_transform_pose(pose_bp, tf_to_base)
         except (tf2_ros.LookupException, tf2_ros.ExtrapolationException):
             self.get_logger().warn(
-                'Grid snapping unavailable — baseplate_frame not found. Publishing unsnapped pose.',
-                throttle_duration_sec=5.0
-            )
+                'Grid snapping unavailable — baseplate_frame not found.',
+                throttle_duration_sec=5.0)
             return pose_base
 
     def publish_poses(self, bricks: list) -> list:
-       
         camera_frame = self.get_parameter('camera_frame').get_parameter_value().string_value
 
         bricks_base = []
@@ -950,8 +939,8 @@ class BrickDetectorNode(Node):
 
         self._update_tracks(bricks_base)
 
-        pose_array             = PoseArray()
-        pose_array.header      = Header()
+        pose_array                 = PoseArray()
+        pose_array.header          = Header()
         pose_array.header.stamp    = self.get_clock().now().to_msg()
         pose_array.header.frame_id = 'base_link'
 
@@ -977,8 +966,7 @@ class BrickDetectorNode(Node):
         self.meta_pub.publish(meta_msg)
         plane_status = 'fitted' if self.ground_plane else 'fallback depth'
         self.get_logger().info(
-            f'Published {len(pose_array.poses)} bricks. Ground plane: {plane_status}'
-        )
+            f'Published {len(pose_array.poses)} bricks. Ground plane: {plane_status}')
         return bricks_out
 
     def publish_markers(self, bricks_base: list):
@@ -994,12 +982,12 @@ class BrickDetectorNode(Node):
         bp_w = BASEPLATE_COLS * STUD_PITCH_M
         bp_d = BASEPLATE_ROWS * STUD_PITCH_M
 
-        bp              = Marker()
+        bp                 = Marker()
         bp.header.frame_id = 'baseplate_frame'
-        bp.header.stamp = now
-        bp.ns, bp.id    = 'baseplate', 0
-        bp.type         = Marker.CUBE
-        bp.action       = Marker.ADD
+        bp.header.stamp    = now
+        bp.ns, bp.id       = 'baseplate', 0
+        bp.type            = Marker.CUBE
+        bp.action          = Marker.ADD
         bp.pose.position.x = bp_w / 2.0
         bp.pose.position.y = bp_d / 2.0
         bp.pose.position.z = -0.005
@@ -1015,16 +1003,16 @@ class BrickDetectorNode(Node):
         grid.type            = Marker.LINE_LIST
         grid.action          = Marker.ADD
         grid.pose.orientation.w = 1.0
-        grid.scale.x         = 0.0008
+        grid.scale.x            = 0.0008
         grid.color.r, grid.color.g, grid.color.b, grid.color.a = 0.05, 0.25, 0.05, 0.70
         Z_GRID = 0.001
         for row in range(BASEPLATE_ROWS + 1):
-            y = row * STUD_PITCH_M
+            y  = row * STUD_PITCH_M
             p0 = Point(); p0.x = 0.0;  p0.y = y; p0.z = Z_GRID
             p1 = Point(); p1.x = bp_w; p1.y = y; p1.z = Z_GRID
             grid.points += [p0, p1]
         for col in range(BASEPLATE_COLS + 1):
-            x = col * STUD_PITCH_M
+            x  = col * STUD_PITCH_M
             p0 = Point(); p0.x = x; p0.y = 0.0;  p0.z = Z_GRID
             p1 = Point(); p1.x = x; p1.y = bp_d; p1.z = Z_GRID
             grid.points += [p0, p1]
@@ -1052,12 +1040,12 @@ class BrickDetectorNode(Node):
             box.color.b, box.color.a = rgba[2], rgba[3]
             markers.markers.append(box)
 
-            txt                 = Marker()
-            txt.header.frame_id = 'base_link'
-            txt.header.stamp    = now
-            txt.ns, txt.id      = 'brick_labels', i
-            txt.type            = Marker.TEXT_VIEW_FACING
-            txt.action          = Marker.ADD
+            txt                    = Marker()
+            txt.header.frame_id    = 'base_link'
+            txt.header.stamp       = now
+            txt.ns, txt.id         = 'brick_labels', i
+            txt.type               = Marker.TEXT_VIEW_FACING
+            txt.action             = Marker.ADD
             txt.pose.position.x    = pose_base.position.x
             txt.pose.position.y    = pose_base.position.y
             txt.pose.position.z    = pose_base.position.z + brick_h + 0.025
