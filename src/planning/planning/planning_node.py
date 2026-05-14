@@ -240,7 +240,16 @@ class LEGOBuildPlanner(Node):
                         f'now scanning for bricks.')
 
             if baseplate_found:
-                for brick in self._detect_bricks():
+                new_bricks = self._detect_bricks()
+                if new_bricks:
+                    self.get_logger().info(
+                        f'Scan pose {i + 1}: detected {len(new_bricks)} brick(s): '
+                        f'{[(b["color"], b["type"]) for b in new_bricks]}')
+                    print(
+                        f'[PLANNER] scan pose {i + 1}: '
+                        f'{[(b["color"], b["type"]) for b in new_bricks]}',
+                        flush=True)
+                for brick in new_bricks:
                     px = brick['pose'].pose.position.x
                     py = brick['pose'].pose.position.y
                     key = (brick['color'], brick['type'],
