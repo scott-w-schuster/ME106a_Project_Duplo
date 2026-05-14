@@ -428,7 +428,7 @@ def main(args=None):
     parser = argparse.ArgumentParser()
     parser.add_argument(
         '--controller', '-c',
-        default='default',
+        default='pid',
         choices=['default', 'pid'],
     )
     parsed, _ = parser.parse_known_args()

@@ -11,7 +11,7 @@ from rclpy.qos import QoSProfile, DurabilityPolicy
 
 from std_srvs.srv import Trigger
 from geometry_msgs.msg import Pose, PoseArray, PoseStamped
-from std_msgs.msg import String
+from std_msgs.msg import Bool, String
 from scipy.spatial.transform import Rotation as R
 
 import tf2_ros
@@ -61,15 +61,17 @@ class LEGOBuildPlanner(Node):
         self.current_step = 0
         self._layer_base_z = self._compute_layer_heights()
 
-        self._lock            = threading.Lock()
-        self._latest_poses    = None
-        self._latest_meta     = None
-        self._last_pick_pose  = None
-        self._last_pick_color = None
+        self._lock              = threading.Lock()
+        self._latest_poses      = None
+        self._latest_meta       = None
+        self._last_pick_pose    = None
+        self._last_pick_color   = None
         self._scan_inventory: dict = {}
+        self._detection_event   = threading.Event()
 
-        self.pick_pub  = self.create_publisher(PoseStamped, '/pick_pose',  LATCH)
-        self.place_pub = self.create_publisher(PoseStamped, '/place_pose', LATCH)
+        self.pick_pub           = self.create_publisher(PoseStamped, '/pick_pose',  LATCH)
+        self.place_pub          = self.create_publisher(PoseStamped, '/place_pose', LATCH)
+        self._detection_pub     = self.create_publisher(Bool, '/brick_detection_enabled', 1)
 
         self.pregrasp_cli = self.create_client(Trigger, '/move_to_pregrasp')
         self.grasp_cli    = self.create_client(Trigger, '/grasp')
@@ -140,6 +142,11 @@ class LEGOBuildPlanner(Node):
             )
         return result
 
+    def _set_detection_enabled(self, enabled: bool):
+        msg = Bool()
+        msg.data = enabled
+        self._detection_pub.publish(msg)
+
     def _on_bricks(self, msg: PoseArray):
         with self._lock:
             self._latest_poses = msg
@@ -147,6 +154,7 @@ class LEGOBuildPlanner(Node):
     def _on_bricks_meta(self, msg: String):
         with self._lock:
             self._latest_meta = json.loads(msg.data)
+        self._detection_event.set()
 
     def _start(self):
         if self._started:
@@ -211,6 +219,7 @@ class LEGOBuildPlanner(Node):
     def _full_scan(self) -> tuple:
         N_SCAN = 7
         self._scan_inventory.clear()
+        self._set_detection_enabled(True)
 
         baseplate_found = self._baseplate_visible()
         if baseplate_found:
@@ -237,6 +246,7 @@ class LEGOBuildPlanner(Node):
                            round(px / 0.05), round(py / 0.05))
                     self._scan_inventory[key] = brick
 
+        self._set_detection_enabled(False)
         inventory = list(self._scan_inventory.values())
         self.get_logger().info(
             f'Scan complete — {len(inventory)} unique brick location(s) accumulated.')
@@ -277,13 +287,20 @@ class LEGOBuildPlanner(Node):
         if self.current_step >= len(self.build_sequence):
             self.get_logger().info('Build complete!')
             return
+        threading.Thread(target=self._run_step, daemon=True).start()
 
+    def _run_step(self):
         step = self.build_sequence[self.current_step]
         self.get_logger().info(
             f'Step {self.current_step + 1}/{len(self.build_sequence)}: '
             f'{step["color"]} {step["type"]} layer={step.get("layer", 0)} '
             f'grid=({step["grid_x"]},{step["grid_z"]}) rot={step["rotation_deg"]}°'
         )
+
+        self._detection_event.clear()
+        self._set_detection_enabled(True)
+        self._detection_event.wait(timeout=5.0)
+        self._set_detection_enabled(False)
 
         detected = self._detect_bricks()
         brick_match = self._find_brick(detected, step['type'], step['color'])

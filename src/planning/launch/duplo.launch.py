@@ -37,6 +37,7 @@ def generate_launch_description():
   planning_main_node = Node(
       package='planning',
       executable='main',
+      arguments=['--controller', 'pid'],
   )
 
 

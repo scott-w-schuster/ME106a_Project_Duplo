@@ -11,7 +11,7 @@ from cv_bridge import CvBridge
 
 from sensor_msgs.msg import Image, CameraInfo, PointCloud2
 from geometry_msgs.msg import Pose, PoseArray, Point, TransformStamped
-from std_msgs.msg import Header, String
+from std_msgs.msg import Bool, Header, String
 from visualization_msgs.msg import Marker, MarkerArray
 
 import tf2_ros
@@ -91,10 +91,10 @@ PLANE_NORMAL_MIN_Z    = 0.85
 HEIGHT_PERCENTILE     = 90
 MIN_CLUSTER_PTS       = 10
 
-TABLE_MASK_MARGIN_M   = 0.006
+TABLE_MASK_MARGIN_M   = 0.018
 MAX_BRICK_HEIGHT_M    = 0.060
 
-VOXEL_SIZE_M          = 0.004
+VOXEL_SIZE_M          = 0.002
 DBSCAN_EPS_M          = 0.012
 DBSCAN_MIN_PTS        = 10
 
@@ -129,7 +129,7 @@ class BrickDetectorNode(Node):
         self._gp_last_fit: float = None
         self.baseplate_z_cam = None
         self._aruco_window: list = []
-        self._last_baseplate_tf = None  # (avg_t, avg_q) cached for re-broadcast
+        self._last_baseplate_tf = None
         self._tracks: list = []
 
         self.create_subscription(
@@ -158,8 +158,15 @@ class BrickDetectorNode(Node):
 
         self.declare_parameter('camera_frame', 'camera_depth_optical_frame')
 
+        self._enabled          = False
+        self._baseplate_locked = False
+
+        self.create_subscription(
+            Bool, '/brick_detection_enabled',
+            lambda msg: setattr(self, '_enabled', msg.data), 10)
+
         self._frame_validated = False
-        self.create_timer(0.2, self.process)
+        self.create_timer(0.5, self.process)
         self.create_timer(2.0, self._validate_camera_frame)
         self.get_logger().info('BrickDetectorNode initialized.')
 
@@ -202,7 +209,7 @@ class BrickDetectorNode(Node):
         depth = self.latest_depth.copy() if self.latest_depth is not None else None
         debug = rgb.copy()
 
-        if self.fx is not None:
+        if self.fx is not None and not self._baseplate_locked:
             bp = self.detect_baseplate_aruco(rgb)
             if bp is None and depth is not None:
                 bp = self.detect_baseplate(rgb, depth)
@@ -231,6 +238,10 @@ class BrickDetectorNode(Node):
                     t.transform.rotation.z    = float(avg_q[2])
                     t.transform.rotation.w    = float(avg_q[3])
                     self.tf_broadcaster.sendTransform(t)
+
+        if not self._enabled:
+            self.debug_pub.publish(self.bridge.cv2_to_imgmsg(debug, encoding='bgr8'))
+            return
 
         if self.latest_xyz is None or self.latest_pc_bgr is None:
             self.debug_pub.publish(self.bridge.cv2_to_imgmsg(debug, encoding='bgr8'))
@@ -550,7 +561,7 @@ class BrickDetectorNode(Node):
         rows = max(1, min(4, round(short_m / STUD_PITCH_M)))
 
         long_3d   = Vt[0, 0] * v1 + Vt[0, 1] * v2
-        angle_deg = float(np.degrees(np.arctan2(long_3d[1], long_3d[0])))
+        angle_deg = 0.0 if rows == cols else float(np.degrees(np.arctan2(long_3d[1], long_3d[0])))
         return rows, cols, angle_deg
 
     def _shape_from_studs(self, cluster_pts: np.ndarray):
@@ -612,7 +623,7 @@ class BrickDetectorNode(Node):
         cols = max(1, min(8, round(long_span  / pitch_px) + 1))
         rows = max(1, min(4, round(short_span / pitch_px) + 1))
 
-        angle_deg = self._angle_from_pca_3d(cluster_pts)
+        angle_deg = 0.0 if rows == cols else self._angle_from_pca_3d(cluster_pts)
         return rows, cols, angle_deg
 
     def _angle_from_pca_3d(self, cluster_pts: np.ndarray) -> float:
@@ -854,8 +865,14 @@ class BrickDetectorNode(Node):
         t.transform.rotation.y    = float(avg_q[1])
         t.transform.rotation.z    = float(avg_q[2])
         t.transform.rotation.w    = float(avg_q[3])
-        self.tf_broadcaster.sendTransform(t)
         self._last_baseplate_tf = (avg_t, avg_q)
+
+        if len(self._aruco_window) >= ARUCO_WINDOW and not self._baseplate_locked:
+            self.static_tf_broadcaster.sendTransform(t)
+            self._baseplate_locked = True
+            self.get_logger().info('Baseplate TF locked as static transform.')
+        else:
+            self.tf_broadcaster.sendTransform(t)
 
     def _current_viewpoint(self):
         camera_frame = self.get_parameter('camera_frame').get_parameter_value().string_value
