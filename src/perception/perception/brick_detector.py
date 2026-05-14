@@ -322,15 +322,26 @@ class BrickDetectorNode(Node):
         pts_bp    = (cam_to_bp @ pts_h.T).T[:, :3]
         col_valid = colors[valid]
 
-        z    = pts_bp[:, 2]
-        # baseplate_frame Z points downward (camera depth direction), so bricks above the
-        # surface appear at NEGATIVE Z — filter the band just above the baseplate surface
-        keep = (z < -TABLE_MASK_MARGIN_M) & (z > -MAX_BRICK_HEIGHT_M)
+        x, y, z = pts_bp[:, 0], pts_bp[:, 1], pts_bp[:, 2]
+
+        bp_w = BASEPLATE_COLS * STUD_PITCH_M
+        bp_d = BASEPLATE_ROWS * STUD_PITCH_M
+        PAD  = 0.02   # 20 mm padding outside baseplate edge
+
+        # Keep only the Z band above the table AND within the baseplate XY footprint.
+        # The XY boundary removes the robot arm, table edges, walls, and other clutter
+        # that would otherwise merge with brick clusters in DBSCAN.
+        keep = (
+            (z < -TABLE_MASK_MARGIN_M) & (z > -MAX_BRICK_HEIGHT_M) &
+            (x >= -PAD) & (x <= bp_w + PAD) &
+            (y >= -PAD) & (y <= bp_d + PAD)
+        )
 
         n_keep = int(np.sum(keep))
         self.get_logger().info(
-            f'[table filter] z range [{z.min():.3f}, {z.max():.3f}]m  '
-            f'keep ({-MAX_BRICK_HEIGHT_M:.3f}<z<{-TABLE_MASK_MARGIN_M:.3f}): {n_keep}/{len(z)} pts',
+            f'[table filter] z=[{z.min():.3f},{z.max():.3f}]m  '
+            f'keep (z∈({-MAX_BRICK_HEIGHT_M:.3f},{-TABLE_MASK_MARGIN_M:.3f}) '
+            f'& xy∈baseplate): {n_keep}/{len(z)} pts',
             throttle_duration_sec=2.0)
 
         if n_keep < DBSCAN_MIN_PTS:
@@ -338,25 +349,6 @@ class BrickDetectorNode(Node):
 
         above_pts = pts_bp[keep]
         above_col = col_valid[keep]
-
-        # Exclude green baseplate points so the table surface doesn't merge with bricks.
-        # Green in LAB 8-bit: A < 118 (below neutral 128) with moderate L.
-        lab = cv2.cvtColor(
-            above_col.reshape(1, -1, 3), cv2.COLOR_BGR2LAB
-        ).reshape(-1, 3).astype(np.float32)
-        is_green = (lab[:, 1] < 118) & (lab[:, 0] > 20) & (lab[:, 0] < 220)
-        color_mask = ~is_green
-
-        n_colored = int(np.sum(color_mask))
-        self.get_logger().info(
-            f'[color filter] {n_colored}/{n_keep} pts after removing green baseplate',
-            throttle_duration_sec=2.0)
-
-        if n_colored < DBSCAN_MIN_PTS:
-            return []
-
-        above_pts = above_pts[color_mask]
-        above_col = above_col[color_mask]
 
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(above_pts)
