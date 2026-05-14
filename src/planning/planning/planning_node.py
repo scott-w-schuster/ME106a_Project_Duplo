@@ -217,7 +217,7 @@ class LEGOBuildPlanner(Node):
         return ok
 
     def _full_scan(self) -> tuple:
-        N_SCAN = 6
+        N_SCAN = 8
         self._scan_inventory.clear()
         self._set_detection_enabled(True)
 
