@@ -109,6 +109,8 @@ class BrickDetectorNode(Node):
         self.baseplate_z_cam    = None
         self._aruco_window: list = []
         self._last_baseplate_tf  = None
+        self._pre_lock_buffer: list = []   # (xyz_cam, bgr_cam, cam_to_base_link 4×4)
+        self._flush_pending      = False
 
         self.create_subscription(
             Image,       '/camera/camera/color/image_raw',
@@ -177,6 +179,22 @@ class BrickDetectorNode(Node):
     def pointcloud_callback(self, msg: PointCloud2):
         self.latest_xyz, self.latest_pc_bgr = self._unpack_pointcloud(msg)
 
+    def _cam_to_base_link(self) -> np.ndarray | None:
+        camera_frame = self.get_parameter('camera_frame').get_parameter_value().string_value
+        try:
+            tf_msg = self.tf_buffer.lookup_transform(
+                'base_link', camera_frame,
+                rclpy.time.Time(), timeout=Duration(seconds=0.1))
+        except (tf2_ros.LookupException, tf2_ros.ExtrapolationException):
+            return None
+        t     = tf_msg.transform.translation
+        q     = tf_msg.transform.rotation
+        R_mat = Rotation.from_quat([q.x, q.y, q.z, q.w]).as_matrix()
+        T     = np.eye(4)
+        T[:3, :3] = R_mat
+        T[:3, 3]  = [t.x, t.y, t.z]
+        return T
+
     def _cam_to_baseplate(self) -> np.ndarray | None:
         camera_frame = self.get_parameter('camera_frame').get_parameter_value().string_value
         try:
@@ -237,9 +255,18 @@ class BrickDetectorNode(Node):
             return
 
         if not self._baseplate_locked:
-            self.get_logger().warn(
-                'Detection enabled but baseplate not yet locked.',
-                throttle_duration_sec=5.0)
+            cam_to_base = self._cam_to_base_link()
+            if (cam_to_base is not None
+                    and self.latest_xyz is not None
+                    and self.latest_pc_bgr is not None):
+                self._pre_lock_buffer.append((
+                    self.latest_xyz.copy(), self.latest_pc_bgr.copy(), cam_to_base))
+                if len(self._pre_lock_buffer) > 16:
+                    self._pre_lock_buffer.pop(0)
+                self.get_logger().info(
+                    f'Baseplate not yet locked — buffered frame '
+                    f'({len(self._pre_lock_buffer)} total)',
+                    throttle_duration_sec=2.0)
             self.debug_pub.publish(self.bridge.cv2_to_imgmsg(debug, encoding='bgr8'))
             return
 
@@ -256,75 +283,13 @@ class BrickDetectorNode(Node):
         self.get_logger().info(
             f'[detect] {len(clusters)} cluster(s) above table',
             throttle_duration_sec=2.0)
-        all_bricks = []
-
-        for ci_idx, (cluster_pts_bp, cluster_bgr) in enumerate(clusters):
-            color_name = self._classify_cluster_color(cluster_bgr)
-            if color_name is None:
-                self.get_logger().info(
-                    f'  cluster {ci_idx}: {len(cluster_pts_bp)} pts — color unclassified, skipping',
-                    throttle_duration_sec=2.0)
-                continue
-
-            footprint = self._cluster_footprint_m2(cluster_pts_bp)
-            if footprint < MIN_BRICK_FOOTPRINT_M2:
-                self.get_logger().info(
-                    f'  cluster {ci_idx}: {color_name} — footprint {footprint*1e4:.1f}cm² < min {MIN_BRICK_FOOTPRINT_M2*1e4:.1f}cm², skipping',
-                    throttle_duration_sec=2.0)
-                continue
-
-            rows, cols, angle_deg = self._shape_from_pointcloud_extent(cluster_pts_bp)
-            shape_key = (min(rows, cols), max(rows, cols))
-            if shape_key not in VALID_BRICK_SHAPES:
-                self.get_logger().info(
-                    f'  cluster {ci_idx}: {color_name} — shape {rows}x{cols} not valid, skipping',
-                    throttle_duration_sec=2.0)
-                continue
-
-            heights_z   = cluster_pts_bp[:, 2]
-            # Z is negative for "upward" in this frame; negate to get positive height values
-            heights_neg = heights_z[heights_z < 0]
-            height_m    = (float(np.percentile(-heights_neg, HEIGHT_PERCENTILE))
-                           if len(heights_neg) >= MIN_CLUSTER_PTS // 2
-                           else BRICK_HEIGHTS['normal'])
-            height_type = self._classify_height(height_m)
-
-            # most-negative Z = topmost points (closest to camera = highest brick surface)
-            top_mask    = cluster_pts_bp[:, 2] <= -(height_m - 0.003)
-            top_pts     = cluster_pts_bp[top_mask]
-            centroid_bp = np.median(
-                top_pts if len(top_pts) >= MIN_CLUSTER_PTS else cluster_pts_bp,
-                axis=0)
-
-            pose_bp = Pose()
-            pose_bp.position.x = float(centroid_bp[0])
-            pose_bp.position.y = float(centroid_bp[1])
-            pose_bp.position.z = float(centroid_bp[2])
-            q = Rotation.from_euler('z', angle_deg, degrees=True).as_quat()
-            pose_bp.orientation.x = float(q[0])
-            pose_bp.orientation.y = float(q[1])
-            pose_bp.orientation.z = float(q[2])
-            pose_bp.orientation.w = float(q[3])
-
-            try:
-                tf_to_base = self.tf_buffer.lookup_transform(
-                    'base_link', 'baseplate_frame',
-                    rclpy.time.Time(), timeout=Duration(seconds=TF_TIMEOUT_SEC))
-                pose_base = tf2_geometry_msgs.do_transform_pose(pose_bp, tf_to_base)
-            except (tf2_ros.LookupException, tf2_ros.ExtrapolationException) as e:
-                self.get_logger().warn(f'base_link←baseplate_frame TF failed: {e}')
-                continue
-
-            all_bricks.append({
-                'color':       color_name,
-                'shape':       (rows, cols),
-                'height_type': height_type,
-                'height_m':    height_m,
-                'pose':        pose_base,
-            })
+        all_bricks = self._clusters_to_bricks(clusters)
 
         bricks_out = self.publish_poses(all_bricks)
         self.publish_markers(bricks_out)
+        if self._flush_pending:
+            self._flush_pending = False
+            self._flush_pre_lock_buffer()
         self.debug_pub.publish(self.bridge.cv2_to_imgmsg(debug, encoding='bgr8'))
 
     def _unpack_pointcloud(self, msg: PointCloud2):
@@ -665,9 +630,118 @@ class BrickDetectorNode(Node):
         if len(self._aruco_window) >= ARUCO_WINDOW and not self._baseplate_locked:
             self.static_tf_broadcaster.sendTransform(t)
             self._baseplate_locked = True
+            self._flush_pending    = True
             self.get_logger().info('Baseplate TF locked as static transform.')
         else:
             self.tf_broadcaster.sendTransform(t)
+
+    def _clusters_to_bricks(self, clusters: list) -> list:
+        all_bricks = []
+        for ci_idx, (cluster_pts_bp, cluster_bgr) in enumerate(clusters):
+            color_name = self._classify_cluster_color(cluster_bgr)
+            if color_name is None:
+                self.get_logger().info(
+                    f'  cluster {ci_idx}: {len(cluster_pts_bp)} pts — color unclassified, skipping',
+                    throttle_duration_sec=2.0)
+                continue
+
+            footprint = self._cluster_footprint_m2(cluster_pts_bp)
+            if footprint < MIN_BRICK_FOOTPRINT_M2:
+                self.get_logger().info(
+                    f'  cluster {ci_idx}: {color_name} — footprint {footprint*1e4:.1f}cm² < '
+                    f'min {MIN_BRICK_FOOTPRINT_M2*1e4:.1f}cm², skipping',
+                    throttle_duration_sec=2.0)
+                continue
+
+            rows, cols, angle_deg = self._shape_from_pointcloud_extent(cluster_pts_bp)
+            shape_key = (min(rows, cols), max(rows, cols))
+            if shape_key not in VALID_BRICK_SHAPES:
+                self.get_logger().info(
+                    f'  cluster {ci_idx}: {color_name} — shape {rows}x{cols} not valid, skipping',
+                    throttle_duration_sec=2.0)
+                continue
+
+            heights_z   = cluster_pts_bp[:, 2]
+            heights_neg = heights_z[heights_z < 0]
+            height_m    = (float(np.percentile(-heights_neg, HEIGHT_PERCENTILE))
+                           if len(heights_neg) >= MIN_CLUSTER_PTS // 2
+                           else BRICK_HEIGHTS['normal'])
+            height_type = self._classify_height(height_m)
+
+            top_mask    = cluster_pts_bp[:, 2] <= -(height_m - 0.003)
+            top_pts     = cluster_pts_bp[top_mask]
+            centroid_bp = np.median(
+                top_pts if len(top_pts) >= MIN_CLUSTER_PTS else cluster_pts_bp,
+                axis=0)
+
+            pose_bp = Pose()
+            pose_bp.position.x = float(centroid_bp[0])
+            pose_bp.position.y = float(centroid_bp[1])
+            pose_bp.position.z = float(centroid_bp[2])
+            q = Rotation.from_euler('z', angle_deg, degrees=True).as_quat()
+            pose_bp.orientation.x = float(q[0])
+            pose_bp.orientation.y = float(q[1])
+            pose_bp.orientation.z = float(q[2])
+            pose_bp.orientation.w = float(q[3])
+
+            try:
+                tf_to_base = self.tf_buffer.lookup_transform(
+                    'base_link', 'baseplate_frame',
+                    rclpy.time.Time(), timeout=Duration(seconds=TF_TIMEOUT_SEC))
+                pose_base = tf2_geometry_msgs.do_transform_pose(pose_bp, tf_to_base)
+            except (tf2_ros.LookupException, tf2_ros.ExtrapolationException) as e:
+                self.get_logger().warn(f'base_link←baseplate_frame TF failed: {e}')
+                continue
+
+            all_bricks.append({
+                'color':       color_name,
+                'shape':       (rows, cols),
+                'height_type': height_type,
+                'height_m':    height_m,
+                'pose':        pose_base,
+            })
+        return all_bricks
+
+    def _flush_pre_lock_buffer(self):
+        if not self._pre_lock_buffer:
+            return
+        self.get_logger().info(
+            f'[buffer] Flushing {len(self._pre_lock_buffer)} pre-lock frames...')
+
+        try:
+            tf_msg = self.tf_buffer.lookup_transform(
+                'baseplate_frame', 'base_link',
+                rclpy.time.Time(), timeout=Duration(seconds=TF_TIMEOUT_SEC))
+        except (tf2_ros.LookupException, tf2_ros.ExtrapolationException) as e:
+            self.get_logger().warn(f'[buffer] baseplate_frame lookup failed: {e}')
+            self._pre_lock_buffer.clear()
+            return
+
+        t     = tf_msg.transform.translation
+        q     = tf_msg.transform.rotation
+        R_mat = Rotation.from_quat([q.x, q.y, q.z, q.w]).as_matrix()
+        base_to_bp        = np.eye(4)
+        base_to_bp[:3, :3] = R_mat
+        base_to_bp[:3, 3]  = [t.x, t.y, t.z]
+
+        all_bricks = []
+        for i, (xyz_cam, bgr_cam, cam_to_base) in enumerate(self._pre_lock_buffer):
+            cam_to_bp = base_to_bp @ cam_to_base
+            clusters  = self._cluster_above_table(xyz_cam, bgr_cam, cam_to_bp)
+            bricks    = self._clusters_to_bricks(clusters)
+            self.get_logger().info(
+                f'[buffer] frame {i + 1}/{len(self._pre_lock_buffer)}: '
+                f'{len(clusters)} cluster(s) → {len(bricks)} brick(s)')
+            all_bricks.extend(bricks)
+
+        self._pre_lock_buffer.clear()
+
+        if all_bricks:
+            self.get_logger().info(
+                f'[buffer] publishing {len(all_bricks)} brick(s) from pre-lock frames: '
+                f'{[(b["color"], b["shape"]) for b in all_bricks]}')
+            bricks_out = self.publish_poses(all_bricks)
+            self.publish_markers(bricks_out)
 
     def publish_poses(self, bricks: list) -> list:
         pose_array                 = PoseArray()
