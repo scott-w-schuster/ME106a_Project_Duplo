@@ -68,6 +68,7 @@ class LEGOBuildPlanner(Node):
         self._last_pick_color   = None
         self._scan_inventory: dict = {}
         self._detection_event   = threading.Event()
+        self._steps_skipped     = 0
 
         self.pick_pub           = self.create_publisher(PoseStamped, '/pick_pose',  LATCH)
         self.place_pub          = self.create_publisher(PoseStamped, '/place_pose', LATCH)
@@ -285,7 +286,20 @@ class LEGOBuildPlanner(Node):
 
     def _execute_step(self):
         if self.current_step >= len(self.build_sequence):
-            self.get_logger().info('Build complete!')
+            total = len(self.build_sequence)
+            done  = total - self._steps_skipped
+            if self._steps_skipped == 0:
+                self.get_logger().info('Build complete!')
+                print('[PLANNER] Build complete — shutting down.', flush=True)
+            else:
+                self.get_logger().warn(
+                    f'Build finished: {done}/{total} steps placed, '
+                    f'{self._steps_skipped} skipped (bricks not found).')
+                print(
+                    f'[PLANNER] Build finished ({done}/{total} placed, '
+                    f'{self._steps_skipped} skipped) — shutting down.',
+                    flush=True)
+            rclpy.shutdown()
             return
         threading.Thread(target=self._run_step, daemon=True).start()
 
@@ -308,9 +322,16 @@ class LEGOBuildPlanner(Node):
             if detected:
                 break
         self._set_detection_enabled(False)
+        print(
+            f'[PLANNER] step {self.current_step + 1}: want {step["color"]} {step["type"]} — '
+            f'live detected: {[(b["color"], b["type"]) for b in detected]}',
+            flush=True)
         brick_match = self._find_brick(detected, step['type'], step['color'])
         if brick_match is None:
             scan_bricks = list(self._scan_inventory.values())
+            print(
+                f'[PLANNER] scan inventory: {[(b["color"], b["type"]) for b in scan_bricks]}',
+                flush=True)
             brick_match = self._find_brick(scan_bricks, step['type'], step['color'])
             if brick_match is not None:
                 self.get_logger().warn(
@@ -319,6 +340,7 @@ class LEGOBuildPlanner(Node):
         if brick_match is None:
             self.get_logger().error(
                 f'No {step["color"]} {step["type"]} found in live or scan inventory — skipping')
+            self._steps_skipped += 1
             self.current_step += 1
             self._execute_step()
             return
@@ -438,8 +460,13 @@ class LEGOBuildPlanner(Node):
         return True
 
     def _find_brick(self, detected: list, block_type: str, color: str):
+        target_dims = BLOCK_DIMS.get(block_type)
         for b in detected:
-            if b['type'] == block_type and b['color'] == color:
+            if b['color'] != color:
+                continue
+            if b['type'] == block_type:
+                return b
+            if target_dims is not None and BLOCK_DIMS.get(b['type']) == target_dims:
                 return b
         return None
 

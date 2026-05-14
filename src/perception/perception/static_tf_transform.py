@@ -21,7 +21,7 @@ class ConstantTransformPublisher(Node):
         self.transform = TransformStamped()
         self.transform.header.stamp = self.get_clock().now().to_msg()
         self.transform.header.frame_id = 'wrist_3_link'
-        self.transform.child_frame_id = 'camera_link'
+        self.transform.child_frame_id = 'camera_depth_optical_frame'
         self.transform.transform.translation.x = G[0, 3]
         self.transform.transform.translation.y = G[1, 3]
         self.transform.transform.translation.z = G[2, 3]
@@ -30,7 +30,7 @@ class ConstantTransformPublisher(Node):
         self.transform.transform.rotation.z = q[2]
         self.transform.transform.rotation.w = q[3]
 
-        self.get_logger().info(f'Broadcasting wrist_3_link -> camera_link: t={G[:3,3]} q={q}')
+        self.get_logger().info(f'Broadcasting wrist_3_link -> camera_depth_optical_frame: t={G[:3,3]} q={q}')
         self.timer = self.create_timer(0.05, self.broadcast_tf)
 
     def broadcast_tf(self):

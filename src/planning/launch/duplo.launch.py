@@ -56,7 +56,8 @@ def generate_launch_description():
 
   camera = ExecuteProcess(cmd=[
       'ros2', 'launch', 'realsense2_camera', 'rs_launch.py',
-      'pointcloud.enable:=true', 'rgb_camera.color_profile:=1920x1080x30'
+      'pointcloud.enable:=true', 'rgb_camera.color_profile:=1920x1080x30',
+      'publish_tf:=false',
   ])
 
   moveit = ExecuteProcess(cmd=[

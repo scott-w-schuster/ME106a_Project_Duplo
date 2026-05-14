@@ -17,7 +17,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 import tf2_ros
 import tf2_geometry_msgs
 from scipy.spatial.transform import Rotation
-from scipy.spatial import cKDTree
+
 
 COLOR_RANGES = {
     'red':          [(( 42, 149, 130), (136, 195, 173))],
@@ -56,9 +56,6 @@ ARUCO_MARKER_ID     = 0
 ARUCO_MARKER_SIZE_M = 0.05
 
 STUD_PITCH_M           = 0.016
-STUD_MIN_RADIUS_PX     = 5
-STUD_MAX_RADIUS_PX     = 20
-STUD_MIN_DIST_PX       = 15
 MAX_BRICK_FOOTPRINT_M2 = (2 * STUD_PITCH_M) * (6 * STUD_PITCH_M) * 2.0
 MIN_BRICK_FOOTPRINT_M2 = (1 * STUD_PITCH_M) * (2 * STUD_PITCH_M) * 0.4
 
@@ -85,32 +82,16 @@ HEIGHT_THRESHOLDS = {
     'tall':   (0.030, 9.999),
 }
 
-PC_SUBSAMPLE          = 8
-RANSAC_INLIER_THRESH  = 0.008
-PLANE_NORMAL_MIN_Z    = 0.85
-HEIGHT_PERCENTILE     = 90
-MIN_CLUSTER_PTS       = 10
-
-TABLE_MASK_MARGIN_M   = 0.018
-MAX_BRICK_HEIGHT_M    = 0.060
-
-VOXEL_SIZE_M          = 0.002
-DBSCAN_EPS_M          = 0.012
-DBSCAN_MIN_PTS        = 10
-
-COLOR_MATCH_MIN_FRAC  = 0.40
-
-TF_TIMEOUT_SEC = 1.0
-
-GROUND_PLANE_REFIT_SECS = 2.0
-
-ARUCO_WINDOW = 3
-
-EMA_ALPHA          = 0.15
-TRACK_MAX_STALE    = 300
-TRACK_MATCH_DIST_M = 0.025
-TRACK_MIN_VIEWPOINTS = 2
-VIEWPOINT_BUCKET_M = 0.05
+HEIGHT_PERCENTILE    = 90
+MIN_CLUSTER_PTS      = 10
+TABLE_MASK_MARGIN_M  = 0.018
+MAX_BRICK_HEIGHT_M   = 0.060
+VOXEL_SIZE_M         = 0.002
+DBSCAN_EPS_M         = 0.012
+DBSCAN_MIN_PTS       = 10
+COLOR_MATCH_MIN_FRAC = 0.40
+TF_TIMEOUT_SEC       = 1.0
+ARUCO_WINDOW         = 3
 
 
 class BrickDetectorNode(Node):
@@ -120,17 +101,14 @@ class BrickDetectorNode(Node):
         self.bridge = CvBridge()
 
         self.fx = self.fy = self.cx = self.cy = None
-        self.dist_coeffs = np.zeros(5, dtype=np.float32)
-        self.latest_rgb   = None
-        self.latest_depth = None
-        self.latest_xyz   = None
+        self.dist_coeffs   = np.zeros(5, dtype=np.float32)
+        self.latest_rgb    = None
+        self.latest_depth  = None
+        self.latest_xyz    = None
         self.latest_pc_bgr = None
-        self.ground_plane = None
-        self._gp_last_fit: float = None
-        self.baseplate_z_cam = None
+        self.baseplate_z_cam    = None
         self._aruco_window: list = []
-        self._last_baseplate_tf = None
-        self._tracks: list = []
+        self._last_baseplate_tf  = None
 
         self.create_subscription(
             Image,       '/camera/camera/color/image_raw',
@@ -181,8 +159,7 @@ class BrickDetectorNode(Node):
         except (tf2_ros.LookupException, tf2_ros.ExtrapolationException):
             self.get_logger().warn(
                 f"Camera frame '{camera_frame}' not found in TF tree.",
-                throttle_duration_sec=5.0
-            )
+                throttle_duration_sec=5.0)
 
     def camera_info_callback(self, msg: CameraInfo):
         self.fx = msg.k[0]; self.fy = msg.k[4]
@@ -200,18 +177,35 @@ class BrickDetectorNode(Node):
     def pointcloud_callback(self, msg: PointCloud2):
         self.latest_xyz, self.latest_pc_bgr = self._unpack_pointcloud(msg)
 
+    def _cam_to_baseplate(self) -> np.ndarray | None:
+        camera_frame = self.get_parameter('camera_frame').get_parameter_value().string_value
+        try:
+            tf_msg = self.tf_buffer.lookup_transform(
+                'baseplate_frame', camera_frame,
+                rclpy.time.Time(), timeout=Duration(seconds=TF_TIMEOUT_SEC))
+        except (tf2_ros.LookupException, tf2_ros.ExtrapolationException) as e:
+            self.get_logger().warn(
+                f'cam→baseplate_frame TF failed: {e}', throttle_duration_sec=5.0)
+            return None
+        t     = tf_msg.transform.translation
+        q     = tf_msg.transform.rotation
+        R_mat = Rotation.from_quat([q.x, q.y, q.z, q.w]).as_matrix()
+        T     = np.eye(4)
+        T[:3, :3] = R_mat
+        T[:3, 3]  = [t.x, t.y, t.z]
+        return T
+
     def process(self):
         if self.latest_rgb is None:
             return
 
         rgb   = self.latest_rgb.copy()
-        depth = self.latest_depth.copy() if self.latest_depth is not None else None
         debug = rgb.copy()
 
         if self.fx is not None and not self._baseplate_locked:
             bp = self.detect_baseplate_aruco(rgb)
-            if bp is None and depth is not None:
-                bp = self.detect_baseplate(rgb, depth)
+            if bp is None and self.latest_depth is not None:
+                bp = self.detect_baseplate(rgb, self.latest_depth.copy())
             if bp is not None:
                 X, Y, Z, angle_deg, box_pts = bp
                 self.baseplate_z_cam = Z
@@ -242,71 +236,79 @@ class BrickDetectorNode(Node):
             self.debug_pub.publish(self.bridge.cv2_to_imgmsg(debug, encoding='bgr8'))
             return
 
+        if not self._baseplate_locked:
+            self.get_logger().warn(
+                'Detection enabled but baseplate not yet locked.',
+                throttle_duration_sec=5.0)
+            self.debug_pub.publish(self.bridge.cv2_to_imgmsg(debug, encoding='bgr8'))
+            return
+
         if self.latest_xyz is None or self.latest_pc_bgr is None:
             self.debug_pub.publish(self.bridge.cv2_to_imgmsg(debug, encoding='bgr8'))
             return
 
-        seg_bgr = self.latest_pc_bgr.copy()
-
-        now_s = self.get_clock().now().nanoseconds * 1e-9
-        if (self._gp_last_fit is None or
-                now_s - self._gp_last_fit > GROUND_PLANE_REFIT_SECS):
-            gp = self._fit_ground_plane(self.latest_xyz)
-            if gp is not None:
-                self.ground_plane = gp
-                self._gp_last_fit = now_s
-
-        if self.ground_plane is None:
-            self.get_logger().warn('Waiting for ground plane fit...', once=True)
+        cam_to_bp = self._cam_to_baseplate()
+        if cam_to_bp is None:
             self.debug_pub.publish(self.bridge.cv2_to_imgmsg(debug, encoding='bgr8'))
             return
 
-        clusters   = self._cluster_above_table(self.latest_xyz, seg_bgr)
+        clusters   = self._cluster_above_table(self.latest_xyz, self.latest_pc_bgr.copy(), cam_to_bp)
         all_bricks = []
-        normal, d  = self.ground_plane
 
-        for cluster_pts, cluster_bgr in clusters:
+        for cluster_pts_bp, cluster_bgr in clusters:
             color_name = self._classify_cluster_color(cluster_bgr)
             if color_name is None:
                 continue
 
-            footprint = self._cluster_footprint_m2(cluster_pts)
-            if footprint < MIN_BRICK_FOOTPRINT_M2:
+            if self._cluster_footprint_m2(cluster_pts_bp) < MIN_BRICK_FOOTPRINT_M2:
                 continue
 
-            rows, cols, angle_deg = self._shape_and_orientation_from_cluster(cluster_pts)
-
+            rows, cols, angle_deg = self._shape_from_pointcloud_extent(cluster_pts_bp)
             if (min(rows, cols), max(rows, cols)) not in VALID_BRICK_SHAPES:
                 continue
 
-            centroid  = np.median(cluster_pts, axis=0)
-            heights   = -(cluster_pts @ normal + d)
-            heights   = heights[heights > 0]
-            height_m  = (float(np.percentile(heights, HEIGHT_PERCENTILE))
-                         if len(heights) >= MIN_CLUSTER_PTS // 2
-                         else BRICK_HEIGHTS['normal'])
+            heights_z   = cluster_pts_bp[:, 2]
+            heights_pos = heights_z[heights_z > 0]
+            height_m    = (float(np.percentile(heights_pos, HEIGHT_PERCENTILE))
+                           if len(heights_pos) >= MIN_CLUSTER_PTS // 2
+                           else BRICK_HEIGHTS['normal'])
             height_type = self._classify_height(height_m)
 
-            pose_cam = Pose()
-            pose_cam.position.x = float(centroid[0])
-            pose_cam.position.y = float(centroid[1])
-            pose_cam.position.z = float(centroid[2])
+            top_mask    = cluster_pts_bp[:, 2] >= (height_m - 0.003)
+            top_pts     = cluster_pts_bp[top_mask]
+            centroid_bp = np.median(
+                top_pts if len(top_pts) >= MIN_CLUSTER_PTS else cluster_pts_bp,
+                axis=0)
+
+            pose_bp = Pose()
+            pose_bp.position.x = float(centroid_bp[0])
+            pose_bp.position.y = float(centroid_bp[1])
+            pose_bp.position.z = float(centroid_bp[2])
             q = Rotation.from_euler('z', angle_deg, degrees=True).as_quat()
-            pose_cam.orientation.x, pose_cam.orientation.y = q[0], q[1]
-            pose_cam.orientation.z, pose_cam.orientation.w = q[2], q[3]
+            pose_bp.orientation.x = float(q[0])
+            pose_bp.orientation.y = float(q[1])
+            pose_bp.orientation.z = float(q[2])
+            pose_bp.orientation.w = float(q[3])
+
+            try:
+                tf_to_base = self.tf_buffer.lookup_transform(
+                    'base_link', 'baseplate_frame',
+                    rclpy.time.Time(), timeout=Duration(seconds=TF_TIMEOUT_SEC))
+                pose_base = tf2_geometry_msgs.do_transform_pose(pose_bp, tf_to_base)
+            except (tf2_ros.LookupException, tf2_ros.ExtrapolationException) as e:
+                self.get_logger().warn(f'base_link←baseplate_frame TF failed: {e}')
+                continue
 
             all_bricks.append({
                 'color':       color_name,
                 'shape':       (rows, cols),
                 'height_type': height_type,
                 'height_m':    height_m,
-                'pose':        pose_cam,
+                'pose':        pose_base,
             })
-            self._draw_cluster_debug(debug, cluster_pts, color_name,
-                                     (rows, cols), height_type, height_m)
 
-        bricks_base = self.publish_poses(all_bricks)
-        self.publish_markers(bricks_base)
+        bricks_out = self.publish_poses(all_bricks)
+        self.publish_markers(bricks_out)
         self.debug_pub.publish(self.bridge.cv2_to_imgmsg(debug, encoding='bgr8'))
 
     def _unpack_pointcloud(self, msg: PointCloud2):
@@ -329,58 +331,24 @@ class BrickDetectorNode(Node):
         bgr = np.stack([b, g, r], axis=2)
         return xyz, bgr
 
-    def _fit_ground_plane(self, xyz: np.ndarray):
-        pts   = xyz.reshape(-1, 3)
-        valid = pts[np.all(np.isfinite(pts), axis=1)]
-        if len(valid) < 100:
-            return None
+    def _cluster_above_table(self, xyz_cam: np.ndarray, bgr: np.ndarray,
+                             cam_to_bp: np.ndarray) -> list:
+        pts_cam = xyz_cam.reshape(-1, 3)
+        colors  = bgr.reshape(-1, 3)
 
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(valid[::PC_SUBSAMPLE])
+        valid     = np.all(np.isfinite(pts_cam), axis=1)
+        pts_h     = np.hstack([pts_cam[valid], np.ones((int(valid.sum()), 1))])
+        pts_bp    = (cam_to_bp @ pts_h.T).T[:, :3]
+        col_valid = colors[valid]
 
-        try:
-            plane_model, inliers = pcd.segment_plane(
-                distance_threshold=RANSAC_INLIER_THRESH,
-                ransac_n=3,
-                num_iterations=500,
-            )
-        except Exception as e:
-            self.get_logger().warn(f'Open3D plane fit failed: {e}')
-            return None
-
-        if len(inliers) < 50:
-            return None
-
-        a, b, c, d = plane_model
-        norm_len = np.sqrt(a*a + b*b + c*c)
-        if norm_len < 1e-6:
-            return None
-        normal = np.array([a, b, c]) / norm_len
-        d      = d / norm_len
-
-        if abs(normal[2]) < PLANE_NORMAL_MIN_Z:
-            return None
-        if normal[2] < 0:
-            normal, d = -normal, -d
-
-        self.get_logger().debug(
-            f'Ground plane: normal={normal.round(3)}, d={d:.4f}, inliers={len(inliers)}')
-        return normal, d
-
-    def _cluster_above_table(self, xyz: np.ndarray, bgr: np.ndarray) -> list:
-        normal, d = self.ground_plane
-        pts       = xyz.reshape(-1, 3)
-        colors    = bgr.reshape(-1, 3)
-
-        valid  = np.all(np.isfinite(pts), axis=1)
-        h      = -(pts @ normal + d)
-        keep   = valid & (h > TABLE_MASK_MARGIN_M) & (h < MAX_BRICK_HEIGHT_M)
+        z    = pts_bp[:, 2]
+        keep = (z > TABLE_MASK_MARGIN_M) & (z < MAX_BRICK_HEIGHT_M)
 
         if np.sum(keep) < DBSCAN_MIN_PTS:
             return []
 
-        above_pts = pts[keep]
-        above_col = colors[keep]
+        above_pts = pts_bp[keep]
+        above_col = col_valid[keep]
 
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(above_pts)
@@ -391,103 +359,19 @@ class BrickDetectorNode(Node):
         colors_down = (np.asarray(pcd_down.colors) * 255).astype(np.uint8)
 
         labels = np.array(pcd_down.cluster_dbscan(
-            eps=DBSCAN_EPS_M,
-            min_points=DBSCAN_MIN_PTS,
-            print_progress=False,
-        ))
+            eps=DBSCAN_EPS_M, min_points=DBSCAN_MIN_PTS, print_progress=False))
 
-        result = []
-        for label in np.unique(labels):
-            if label < 0:
-                continue
-            mask    = labels == label
-            pts_c   = pts_down[mask]
-            col_c   = colors_down[mask]
-            if self._cluster_footprint_m2(pts_c) > MAX_BRICK_FOOTPRINT_M2:
-                self.get_logger().debug('Oversized cluster detected — attempting depth split.')
-                result.extend(self._split_large_cluster(pts_c, col_c))
-            else:
-                result.append((pts_c, col_c))
-        return result
+        return [
+            (pts_down[labels == lbl], colors_down[labels == lbl])
+            for lbl in np.unique(labels) if lbl >= 0
+        ]
 
-    def _cluster_footprint_m2(self, pts: np.ndarray) -> float:
-        if self.ground_plane is None or len(pts) < 3:
+    def _cluster_footprint_m2(self, pts_bp: np.ndarray) -> float:
+        if len(pts_bp) < 3:
             return 0.0
-        normal, _ = self.ground_plane
-        ref = (np.array([1.0, 0.0, 0.0]) if abs(normal[0]) < 0.9
-               else np.array([0.0, 1.0, 0.0]))
-        v1 = np.cross(normal, ref); v1 /= np.linalg.norm(v1)
-        v2 = np.cross(normal, v1);  v2 /= np.linalg.norm(v2)
-        proj = np.column_stack([pts @ v1, pts @ v2]).astype(np.float32)
+        proj = pts_bp[:, :2].astype(np.float32)
         hull = cv2.convexHull(proj.reshape(-1, 1, 2))
         return float(cv2.contourArea(hull))
-
-    def _find_depth_seam(self, pts: np.ndarray):
-        if self.ground_plane is None or len(pts) < MIN_CLUSTER_PTS * 2:
-            return None
-
-        normal, _ = self.ground_plane
-        ref = (np.array([1.0, 0.0, 0.0]) if abs(normal[0]) < 0.9
-               else np.array([0.0, 1.0, 0.0]))
-        v1 = np.cross(normal, ref); v1 /= np.linalg.norm(v1)
-        v2 = np.cross(normal, v1);  v2 /= np.linalg.norm(v2)
-
-        proj_2d  = np.column_stack([pts @ v1, pts @ v2])
-        centered = proj_2d - proj_2d.mean(axis=0)
-        _, _, Vt = np.linalg.svd(centered, full_matrices=False)
-        long_2d  = Vt[0]
-        long_3d  = long_2d[0] * v1 + long_2d[1] * v2
-        long_3d /= np.linalg.norm(long_3d)
-
-        proj_1d = pts @ long_3d
-        lo, hi  = proj_1d.min(), proj_1d.max()
-        span    = hi - lo
-
-        if span < STUD_PITCH_M * 3:
-            return None
-
-        n_bins = max(12, int(span / (STUD_PITCH_M * 0.4)))
-        counts, bin_edges = np.histogram(proj_1d, bins=n_bins)
-        bin_centers       = (bin_edges[:-1] + bin_edges[1:]) / 2
-        smooth            = np.convolve(counts.astype(float), np.ones(3) / 3, mode='same')
-
-        margin = n_bins // 3
-        search = smooth[margin: n_bins - margin]
-        if len(search) == 0:
-            return None
-        min_idx = margin + int(np.argmin(search))
-
-        left_peak  = smooth[:min_idx].max() if min_idx > 0 else 0
-        right_peak = smooth[min_idx + 1:].max() if min_idx < len(smooth) - 1 else 0
-        avg_peak   = (left_peak + right_peak) / 2
-        if avg_peak < 1 or smooth[min_idx] > avg_peak * 0.6:
-            return None
-
-        return long_3d, float(bin_centers[min_idx])
-
-    def _split_large_cluster(self, pts: np.ndarray, colors: np.ndarray) -> list:
-        seam = self._find_depth_seam(pts)
-        if seam is not None:
-            long_3d, split_val = seam
-            side_a = (pts @ long_3d) <= split_val
-            if side_a.sum() >= MIN_CLUSTER_PTS and (~side_a).sum() >= MIN_CLUSTER_PTS:
-                self.get_logger().debug('Depth seam split successful.')
-                return [(pts[side_a], colors[side_a]), (pts[~side_a], colors[~side_a])]
-
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(pts)
-        labels = np.array(pcd.cluster_dbscan(
-            eps=DBSCAN_EPS_M * 0.6,
-            min_points=max(3, DBSCAN_MIN_PTS // 2),
-            print_progress=False,
-        ))
-        sub = []
-        for lbl in np.unique(labels):
-            if lbl < 0:
-                continue
-            m = labels == lbl
-            sub.append((pts[m], colors[m]))
-        return sub if len(sub) > 1 else [(pts, colors)]
 
     def _classify_cluster_color(self, cluster_bgr: np.ndarray):
         lab_pts = cv2.cvtColor(
@@ -526,30 +410,12 @@ class BrickDetectorNode(Node):
             return None
         return best_color
 
-    def _shape_and_orientation_from_cluster(self, cluster_pts: np.ndarray) -> tuple:
-        if self.ground_plane is None or len(cluster_pts) < MIN_CLUSTER_PTS:
+    def _shape_from_pointcloud_extent(self, pts_bp: np.ndarray) -> tuple:
+        if len(pts_bp) < MIN_CLUSTER_PTS:
             return 1, 1, 0.0
 
-        if self.latest_rgb is not None and self.fx is not None:
-            result = self._shape_from_studs(cluster_pts)
-            if result is not None:
-                stud_rows, stud_cols, angle_deg = result
-                pc_rows, pc_cols, _ = self._shape_from_pointcloud_extent(cluster_pts)
-                if pc_rows * pc_cols > stud_rows * stud_cols * 1.5:
-                    return pc_rows, pc_cols, angle_deg
-                return stud_rows, stud_cols, angle_deg
-
-        return self._shape_from_pointcloud_extent(cluster_pts)
-
-    def _shape_from_pointcloud_extent(self, cluster_pts: np.ndarray) -> tuple:
-        normal, _ = self.ground_plane
-        ref = (np.array([1.0, 0.0, 0.0]) if abs(normal[0]) < 0.9
-               else np.array([0.0, 1.0, 0.0]))
-        v1 = np.cross(normal, ref); v1 /= np.linalg.norm(v1)
-        v2 = np.cross(normal, v1);  v2 /= np.linalg.norm(v2)
-
-        proj     = np.column_stack([cluster_pts @ v1, cluster_pts @ v2])
-        centered = proj - proj.mean(axis=0)
+        xy       = pts_bp[:, :2]
+        centered = xy - xy.mean(axis=0)
         _, _, Vt = np.linalg.svd(centered, full_matrices=False)
         proj_pca = centered @ Vt.T
 
@@ -559,112 +425,9 @@ class BrickDetectorNode(Node):
         cols = max(1, min(8, round(long_m  / STUD_PITCH_M)))
         rows = max(1, min(4, round(short_m / STUD_PITCH_M)))
 
-        long_3d   = Vt[0, 0] * v1 + Vt[0, 1] * v2
-        angle_deg = 0.0 if rows == cols else float(np.degrees(np.arctan2(long_3d[1], long_3d[0])))
+        long_vec  = np.array([Vt[0, 0], Vt[0, 1]])
+        angle_deg = 0.0 if rows == cols else float(np.degrees(np.arctan2(long_vec[1], long_vec[0])))
         return rows, cols, angle_deg
-
-    def _shape_from_studs(self, cluster_pts: np.ndarray):
-        Z_vals = cluster_pts[:, 2]
-        valid  = Z_vals > 0
-        if not np.any(valid):
-            return None
-        pts = cluster_pts[valid]
-        u = (pts[:, 0] / pts[:, 2] * self.fx + self.cx).astype(np.int32)
-        v = (pts[:, 1] / pts[:, 2] * self.fy + self.cy).astype(np.int32)
-
-        H, W   = self.latest_rgb.shape[:2]
-        in_img = (u >= 0) & (u < W) & (v >= 0) & (v < H)
-        if not np.any(in_img):
-            return None
-
-        u_in, v_in = u[in_img], v[in_img]
-        u_min, u_max = int(u_in.min()), int(u_in.max())
-        v_min, v_max = int(v_in.min()), int(v_in.max())
-        if (u_max - u_min) < 10 or (v_max - v_min) < 10:
-            return None
-
-        mask = np.zeros((H, W), dtype=np.uint8)
-        mask[v_in, u_in] = 255
-        k    = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-        mask = cv2.dilate(mask, k)
-
-        roi_bgr  = self.latest_rgb[v_min:v_max + 1, u_min:u_max + 1]
-        roi_mask = mask[v_min:v_max + 1, u_min:u_max + 1]
-        gray     = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
-        gray     = cv2.bitwise_and(gray, gray, mask=roi_mask)
-        blurred  = cv2.GaussianBlur(gray, (5, 5), 1.5)
-
-        circles = cv2.HoughCircles(
-            blurred, cv2.HOUGH_GRADIENT,
-            dp=1, minDist=STUD_MIN_DIST_PX,
-            param1=50, param2=18,
-            minRadius=STUD_MIN_RADIUS_PX, maxRadius=STUD_MAX_RADIUS_PX,
-        )
-        if circles is None or len(circles[0]) < 2:
-            return None
-
-        centers = np.round(circles[0, :, :2]).astype(float)
-
-        tree     = cKDTree(centers)
-        dists, _ = tree.query(centers, k=min(2, len(centers)))
-        if dists.ndim == 1 or dists.shape[1] < 2:
-            return None
-        pitch_px = float(np.median(dists[:, 1]))
-        if pitch_px < 3:
-            return None
-
-        centered_c = centers - centers.mean(axis=0)
-        _, _, Vt   = np.linalg.svd(centered_c, full_matrices=False)
-        proj_pca   = centered_c @ Vt.T
-        long_span  = proj_pca[:, 0].max() - proj_pca[:, 0].min()
-        short_span = proj_pca[:, 1].max() - proj_pca[:, 1].min()
-
-        cols = max(1, min(8, round(long_span  / pitch_px) + 1))
-        rows = max(1, min(4, round(short_span / pitch_px) + 1))
-
-        angle_deg = 0.0 if rows == cols else self._angle_from_pca_3d(cluster_pts)
-        return rows, cols, angle_deg
-
-    def _angle_from_pca_3d(self, cluster_pts: np.ndarray) -> float:
-        if self.ground_plane is None:
-            return 0.0
-        normal, _ = self.ground_plane
-        ref = (np.array([1.0, 0.0, 0.0]) if abs(normal[0]) < 0.9
-               else np.array([0.0, 1.0, 0.0]))
-        v1 = np.cross(normal, ref); v1 /= np.linalg.norm(v1)
-        v2 = np.cross(normal, v1);  v2 /= np.linalg.norm(v2)
-        proj     = np.column_stack([cluster_pts @ v1, cluster_pts @ v2])
-        centered = proj - proj.mean(axis=0)
-        _, _, Vt = np.linalg.svd(centered, full_matrices=False)
-        long_3d  = Vt[0, 0] * v1 + Vt[0, 1] * v2
-        return float(np.degrees(np.arctan2(long_3d[1], long_3d[0])))
-
-    def _draw_cluster_debug(self, debug: np.ndarray, cluster_pts: np.ndarray,
-                             color_name: str, shape: tuple,
-                             height_type: str, height_m: float):
-        if self.fx is None:
-            return
-        Z_v   = cluster_pts[:, 2]
-        valid = Z_v > 0
-        if not np.any(valid):
-            return
-        pts = cluster_pts[valid]
-        Z   = pts[:, 2]
-        u   = (pts[:, 0] / Z * self.fx + self.cx).astype(np.int32)
-        v   = (pts[:, 1] / Z * self.fy + self.cy).astype(np.int32)
-        H, W   = debug.shape[:2]
-        in_img = (u >= 0) & (u < W) & (v >= 0) & (v < H)
-        if not np.any(in_img):
-            return
-        px   = np.column_stack([u[in_img], v[in_img]])
-        hull = cv2.convexHull(px.reshape(-1, 1, 2))
-        cv2.drawContours(debug, [hull], 0, (0, 255, 0), 2)
-        cx_px, cy_px = int(px[:, 0].mean()), int(px[:, 1].mean())
-        rows, cols   = shape
-        label = f'{color_name} {rows}x{cols} [{height_type}] {height_m*1000:.0f}mm'
-        cv2.putText(debug, label, (cx_px - 30, cy_px - 12),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.50, (255, 255, 255), 1)
-        cv2.circle(debug, (cx_px, cy_px), 4, (0, 255, 255), -1)
 
     def _classify_height(self, height_m: float) -> str:
         for label, (lo, hi) in HEIGHT_THRESHOLDS.items():
@@ -676,7 +439,7 @@ class BrickDetectorNode(Node):
         if self.fx is None:
             return None
 
-        gray = cv2.cvtColor(rgb, cv2.COLOR_BGR2GRAY)
+        gray            = cv2.cvtColor(rgb, cv2.COLOR_BGR2GRAY)
         clahe           = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
         gray_clahe      = clahe.apply(gray)
         gray_blur_clahe = clahe.apply(cv2.GaussianBlur(gray, (5, 5), 1.0))
@@ -797,12 +560,13 @@ class BrickDetectorNode(Node):
 
         rect = cv2.minAreaRect(largest)
         (cx_px, cy_px), (w_px, h_px), angle_deg = rect
-        if w_px < h_px: angle_deg += 90.0
+        if w_px < h_px:
+            angle_deg += 90.0
         box_pts = np.int0(cv2.boxPoints(rect))
 
         ci, ri = int(cx_px), int(cy_px)
         ih, iw = depth.shape
-        window = depth[max(0,ri-5):min(ih,ri+6), max(0,ci-5):min(iw,ci+6)]
+        window = depth[max(0, ri-5):min(ih, ri+6), max(0, ci-5):min(iw, ci+6)]
         valid  = window[(window > 0) & np.isfinite(window)]
         if len(valid) == 0:
             return None
@@ -873,135 +637,32 @@ class BrickDetectorNode(Node):
         else:
             self.tf_broadcaster.sendTransform(t)
 
-    def _current_viewpoint(self):
-        camera_frame = self.get_parameter('camera_frame').get_parameter_value().string_value
-        try:
-            tf = self.tf_buffer.lookup_transform(
-                'base_link', camera_frame, rclpy.time.Time(), timeout=Duration(seconds=0.1))
-            t = tf.transform.translation
-            return (round(t.x / VIEWPOINT_BUCKET_M),
-                    round(t.y / VIEWPOINT_BUCKET_M),
-                    round(t.z / VIEWPOINT_BUCKET_M))
-        except (tf2_ros.LookupException, tf2_ros.ExtrapolationException):
-            return None
-
-    def _update_tracks(self, bricks_base: list):
-        for track in self._tracks:
-            track['stale'] += 1
-
-        viewpoint = self._current_viewpoint()
-
-        for brick in bricks_base:
-            px       = brick['pose_base'].position
-            best_idx  = None
-            best_dist = TRACK_MATCH_DIST_M
-
-            for i, track in enumerate(self._tracks):
-                if track['color'] != brick['color']:
-                    continue
-                tp   = track['pose_base'].position
-                dist = np.hypot(px.x - tp.x, px.y - tp.y)
-                if dist < best_dist:
-                    best_dist = dist
-                    best_idx  = i
-
-            if best_idx is not None:
-                track = self._tracks[best_idx]
-                tp    = track['pose_base'].position
-                a     = EMA_ALPHA
-                tp.x  = a * px.x + (1 - a) * tp.x
-                tp.y  = a * px.y + (1 - a) * tp.y
-                tp.z  = a * px.z + (1 - a) * tp.z
-                track['pose_base'].orientation = brick['pose_base'].orientation
-                track['shape']       = brick['shape']
-                track['height_type'] = brick['height_type']
-                track['height_m']    = brick['height_m']
-                track['stale']       = 0
-                if viewpoint is not None:
-                    track['viewpoints'].add(viewpoint)
-            else:
-                self._tracks.append({
-                    'color':       brick['color'],
-                    'shape':       brick['shape'],
-                    'height_type': brick['height_type'],
-                    'height_m':    brick['height_m'],
-                    'pose_base':   brick['pose_base'],
-                    'stale':       0,
-                    'viewpoints':  {viewpoint} if viewpoint is not None else set(),
-                })
-
-        self._tracks = [t for t in self._tracks if t['stale'] <= TRACK_MAX_STALE]
-
-    def _snap_to_grid(self, pose_base: Pose, shape: tuple) -> Pose:
-        try:
-            tf_to_bp = self.tf_buffer.lookup_transform(
-                'baseplate_frame', 'base_link',
-                rclpy.time.Time(), timeout=Duration(seconds=0.1))
-            pose_bp = tf2_geometry_msgs.do_transform_pose(pose_base, tf_to_bp)
-
-            rows, cols = shape
-            x_corner = round(pose_bp.position.x / STUD_PITCH_M - cols / 2.0)
-            y_corner = round(pose_bp.position.y / STUD_PITCH_M - rows / 2.0)
-            pose_bp.position.x = (x_corner + cols / 2.0) * STUD_PITCH_M
-            pose_bp.position.y = (y_corner + rows / 2.0) * STUD_PITCH_M
-
-            tf_to_base = self.tf_buffer.lookup_transform(
-                'base_link', 'baseplate_frame',
-                rclpy.time.Time(), timeout=Duration(seconds=0.1))
-            return tf2_geometry_msgs.do_transform_pose(pose_bp, tf_to_base)
-        except (tf2_ros.LookupException, tf2_ros.ExtrapolationException):
-            self.get_logger().warn(
-                'Grid snapping unavailable — baseplate_frame not found.',
-                throttle_duration_sec=5.0)
-            return pose_base
-
     def publish_poses(self, bricks: list) -> list:
-        camera_frame = self.get_parameter('camera_frame').get_parameter_value().string_value
-
-        bricks_base = []
-        for brick in bricks:
-            try:
-                tf        = self.tf_buffer.lookup_transform(
-                    'base_link', camera_frame,
-                    rclpy.time.Time(), timeout=Duration(seconds=TF_TIMEOUT_SEC))
-                pose_base = tf2_geometry_msgs.do_transform_pose(brick['pose'], tf)
-                bricks_base.append({**brick, 'pose_base': pose_base})
-            except (tf2_ros.LookupException, tf2_ros.ExtrapolationException) as e:
-                self.get_logger().warn(f'TF lookup failed: {e}')
-
-        self._update_tracks(bricks_base)
-
         pose_array                 = PoseArray()
         pose_array.header          = Header()
         pose_array.header.stamp    = self.get_clock().now().to_msg()
         pose_array.header.frame_id = 'base_link'
 
-        meta_list  = []
-        bricks_out = []
-
-        for track in self._tracks:
-            if len(track['viewpoints']) < TRACK_MIN_VIEWPOINTS:
-                continue
-            pose_out = self._snap_to_grid(track['pose_base'], track['shape'])
-            pose_array.poses.append(pose_out)
+        meta_list = []
+        for brick in bricks:
+            pose_array.poses.append(brick['pose'])
             meta_list.append({
-                'color':       track['color'],
-                'shape':       list(track['shape']),
-                'height_type': track['height_type'],
-                'height_m':    round(track['height_m'] * 1000, 1),
+                'color':       brick['color'],
+                'shape':       list(brick['shape']),
+                'height_type': brick['height_type'],
+                'height_m':    round(brick['height_m'] * 1000, 1),
             })
-            bricks_out.append({**track, 'pose_base': pose_out})
 
         self.pose_pub.publish(pose_array)
         meta_msg      = String()
         meta_msg.data = json.dumps(meta_list)
         self.meta_pub.publish(meta_msg)
-        plane_status = 'fitted' if self.ground_plane else 'fallback depth'
         self.get_logger().info(
-            f'Published {len(pose_array.poses)} bricks. Ground plane: {plane_status}')
-        return bricks_out
+            f'Published {len(pose_array.poses)} bricks.',
+            throttle_duration_sec=1.0)
+        return bricks
 
-    def publish_markers(self, bricks_base: list):
+    def publish_markers(self, bricks: list):
         now     = self.get_clock().now().to_msg()
         markers = MarkerArray()
 
@@ -1050,11 +711,11 @@ class BrickDetectorNode(Node):
             grid.points += [p0, p1]
         markers.markers.append(grid)
 
-        for i, brick in enumerate(bricks_base):
+        for i, brick in enumerate(bricks):
             br, bc      = brick['shape']
             height_type = brick['height_type']
             height_m    = brick['height_m']
-            pose_base   = brick['pose_base']
+            pose_base   = brick['pose']
             brick_h     = BRICK_HEIGHTS.get(height_type, BRICK_HEIGHTS['normal'])
             rgba        = BRICK_COLORS_RGBA.get(brick['color'], (0.8, 0.8, 0.8, 1.0))
 
