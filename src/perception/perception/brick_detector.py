@@ -282,13 +282,15 @@ class BrickDetectorNode(Node):
                 continue
 
             heights_z   = cluster_pts_bp[:, 2]
-            heights_pos = heights_z[heights_z > 0]
-            height_m    = (float(np.percentile(heights_pos, HEIGHT_PERCENTILE))
-                           if len(heights_pos) >= MIN_CLUSTER_PTS // 2
+            # Z is negative for "upward" in this frame; negate to get positive height values
+            heights_neg = heights_z[heights_z < 0]
+            height_m    = (float(np.percentile(-heights_neg, HEIGHT_PERCENTILE))
+                           if len(heights_neg) >= MIN_CLUSTER_PTS // 2
                            else BRICK_HEIGHTS['normal'])
             height_type = self._classify_height(height_m)
 
-            top_mask    = cluster_pts_bp[:, 2] >= (height_m - 0.003)
+            # most-negative Z = topmost points (closest to camera = highest brick surface)
+            top_mask    = cluster_pts_bp[:, 2] <= -(height_m - 0.003)
             top_pts     = cluster_pts_bp[top_mask]
             centroid_bp = np.median(
                 top_pts if len(top_pts) >= MIN_CLUSTER_PTS else cluster_pts_bp,
@@ -356,12 +358,14 @@ class BrickDetectorNode(Node):
         col_valid = colors[valid]
 
         z    = pts_bp[:, 2]
-        keep = (z > TABLE_MASK_MARGIN_M) & (z < MAX_BRICK_HEIGHT_M)
+        # baseplate_frame Z points downward (camera depth direction), so bricks above the
+        # surface appear at NEGATIVE Z — filter the band just above the baseplate surface
+        keep = (z < -TABLE_MASK_MARGIN_M) & (z > -MAX_BRICK_HEIGHT_M)
 
         n_keep = int(np.sum(keep))
         self.get_logger().info(
             f'[table filter] z range [{z.min():.3f}, {z.max():.3f}]m  '
-            f'keep ({TABLE_MASK_MARGIN_M:.3f}<z<{MAX_BRICK_HEIGHT_M:.3f}): {n_keep}/{len(z)} pts',
+            f'keep ({-MAX_BRICK_HEIGHT_M:.3f}<z<{-TABLE_MASK_MARGIN_M:.3f}): {n_keep}/{len(z)} pts',
             throttle_duration_sec=2.0)
 
         if n_keep < DBSCAN_MIN_PTS:
