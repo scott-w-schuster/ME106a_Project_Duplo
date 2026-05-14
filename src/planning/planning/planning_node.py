@@ -217,7 +217,7 @@ class LEGOBuildPlanner(Node):
         return ok
 
     def _full_scan(self) -> tuple:
-        N_SCAN = 7
+        N_SCAN = 6
         self._scan_inventory.clear()
         self._set_detection_enabled(True)
 
@@ -299,10 +299,15 @@ class LEGOBuildPlanner(Node):
 
         self._detection_event.clear()
         self._set_detection_enabled(True)
-        self._detection_event.wait(timeout=5.0)
+        deadline = time.time() + 8.0
+        detected = []
+        while time.time() < deadline:
+            self._detection_event.wait(timeout=1.0)
+            self._detection_event.clear()
+            detected = self._detect_bricks()
+            if detected:
+                break
         self._set_detection_enabled(False)
-
-        detected = self._detect_bricks()
         brick_match = self._find_brick(detected, step['type'], step['color'])
         if brick_match is None:
             scan_bricks = list(self._scan_inventory.values())

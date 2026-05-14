@@ -180,8 +180,7 @@ class BrickDetectorNode(Node):
             self._frame_validated = True
         except (tf2_ros.LookupException, tf2_ros.ExtrapolationException):
             self.get_logger().warn(
-                f"Camera frame '{camera_frame}' not found in TF tree. "
-                f"Common values: camera_color_optical_frame, camera_depth_optical_frame.",
+                f"Camera frame '{camera_frame}' not found in TF tree.",
                 throttle_duration_sec=5.0
             )
 
