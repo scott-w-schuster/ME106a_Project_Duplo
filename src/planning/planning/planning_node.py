@@ -308,7 +308,10 @@ class LEGOBuildPlanner(Node):
                     f'[PLANNER] Build finished ({done}/{total} placed, '
                     f'{self._steps_skipped} skipped) — shutting down.',
                     flush=True)
-            rclpy.shutdown()
+            try:
+                rclpy.shutdown()
+            except Exception:
+                pass
             return
         threading.Thread(target=self._run_step, daemon=True).start()
 
@@ -525,9 +528,19 @@ class LEGOBuildPlanner(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = LEGOBuildPlanner()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except Exception:
+        pass
+    finally:
+        try:
+            node.destroy_node()
+        except Exception:
+            pass
+        try:
+            rclpy.shutdown()
+        except Exception:
+            pass
 
 
 if __name__ == '__main__':

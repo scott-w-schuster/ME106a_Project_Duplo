@@ -374,32 +374,9 @@ class BrickDetectorNode(Node):
         above_pts = pts_bp[keep]
         above_col = col_valid[keep]
 
-        # Pre-filter: keep only points that match a known brick color.
-        # This removes the table surface (wrong color) before DBSCAN so the
-        # entire table doesn't merge into one giant cluster.
-        lab = cv2.cvtColor(
-            above_col.reshape(1, -1, 3), cv2.COLOR_BGR2LAB
-        ).reshape(-1, 3).astype(np.float32)
-        l_vals     = lab[:, 0]
-        valid_l    = (l_vals > 30) & (l_vals < 240)
-        color_mask = np.zeros(len(above_pts), dtype=bool)
-        for ranges in COLOR_RANGES.values():
-            for lower, upper in ranges:
-                color_mask |= np.all(
-                    (lab >= np.array(lower, np.float32)) &
-                    (lab <= np.array(upper, np.float32)), axis=1)
-        color_mask &= valid_l
-
-        n_colored = int(np.sum(color_mask))
         self.get_logger().info(
-            f'[color filter] {n_colored}/{n_keep} pts match a brick color',
+            f'[color filter] DISABLED — passing all {n_keep} pts to DBSCAN',
             throttle_duration_sec=2.0)
-
-        if n_colored < DBSCAN_MIN_PTS:
-            return []
-
-        above_pts = above_pts[color_mask]
-        above_col = above_col[color_mask]
 
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(above_pts)
