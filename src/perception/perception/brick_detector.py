@@ -84,7 +84,7 @@ HEIGHT_THRESHOLDS = {
 
 HEIGHT_PERCENTILE    = 90
 MIN_CLUSTER_PTS      = 10
-TABLE_MASK_MARGIN_M  = 0.018
+TABLE_MASK_MARGIN_M  = 0.005
 MAX_BRICK_HEIGHT_M   = 0.060
 VOXEL_SIZE_M         = 0.002
 DBSCAN_EPS_M         = 0.012
@@ -253,18 +253,32 @@ class BrickDetectorNode(Node):
             return
 
         clusters   = self._cluster_above_table(self.latest_xyz, self.latest_pc_bgr.copy(), cam_to_bp)
+        self.get_logger().info(
+            f'[detect] {len(clusters)} cluster(s) above table',
+            throttle_duration_sec=2.0)
         all_bricks = []
 
-        for cluster_pts_bp, cluster_bgr in clusters:
+        for ci_idx, (cluster_pts_bp, cluster_bgr) in enumerate(clusters):
             color_name = self._classify_cluster_color(cluster_bgr)
             if color_name is None:
+                self.get_logger().info(
+                    f'  cluster {ci_idx}: {len(cluster_pts_bp)} pts — color unclassified, skipping',
+                    throttle_duration_sec=2.0)
                 continue
 
-            if self._cluster_footprint_m2(cluster_pts_bp) < MIN_BRICK_FOOTPRINT_M2:
+            footprint = self._cluster_footprint_m2(cluster_pts_bp)
+            if footprint < MIN_BRICK_FOOTPRINT_M2:
+                self.get_logger().info(
+                    f'  cluster {ci_idx}: {color_name} — footprint {footprint*1e4:.1f}cm² < min {MIN_BRICK_FOOTPRINT_M2*1e4:.1f}cm², skipping',
+                    throttle_duration_sec=2.0)
                 continue
 
             rows, cols, angle_deg = self._shape_from_pointcloud_extent(cluster_pts_bp)
-            if (min(rows, cols), max(rows, cols)) not in VALID_BRICK_SHAPES:
+            shape_key = (min(rows, cols), max(rows, cols))
+            if shape_key not in VALID_BRICK_SHAPES:
+                self.get_logger().info(
+                    f'  cluster {ci_idx}: {color_name} — shape {rows}x{cols} not valid, skipping',
+                    throttle_duration_sec=2.0)
                 continue
 
             heights_z   = cluster_pts_bp[:, 2]
@@ -344,7 +358,13 @@ class BrickDetectorNode(Node):
         z    = pts_bp[:, 2]
         keep = (z > TABLE_MASK_MARGIN_M) & (z < MAX_BRICK_HEIGHT_M)
 
-        if np.sum(keep) < DBSCAN_MIN_PTS:
+        n_keep = int(np.sum(keep))
+        self.get_logger().info(
+            f'[table filter] z range [{z.min():.3f}, {z.max():.3f}]m  '
+            f'keep ({TABLE_MASK_MARGIN_M:.3f}<z<{MAX_BRICK_HEIGHT_M:.3f}): {n_keep}/{len(z)} pts',
+            throttle_duration_sec=2.0)
+
+        if n_keep < DBSCAN_MIN_PTS:
             return []
 
         above_pts = pts_bp[keep]
@@ -361,9 +381,13 @@ class BrickDetectorNode(Node):
         labels = np.array(pcd_down.cluster_dbscan(
             eps=DBSCAN_EPS_M, min_points=DBSCAN_MIN_PTS, print_progress=False))
 
+        unique_lbls = [lbl for lbl in np.unique(labels) if lbl >= 0]
+        self.get_logger().info(
+            f'[dbscan] {len(pts_down)} pts after voxel → {len(unique_lbls)} cluster(s)',
+            throttle_duration_sec=2.0)
         return [
             (pts_down[labels == lbl], colors_down[labels == lbl])
-            for lbl in np.unique(labels) if lbl >= 0
+            for lbl in unique_lbls
         ]
 
     def _cluster_footprint_m2(self, pts_bp: np.ndarray) -> float:
